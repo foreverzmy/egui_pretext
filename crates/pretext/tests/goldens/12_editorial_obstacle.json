@@ -1,0 +1,366 @@
+{
+  "body_lines": [
+    {
+      "x": 80.0,
+      "y": 136.0,
+      "width": 104.994,
+      "text": "rowsers still"
+    },
+    {
+      "x": 80.0,
+      "y": 164.0,
+      "width": 81.99,
+      "text": "treat text"
+    },
+    {
+      "x": 80.0,
+      "y": 192.0,
+      "width": 23.4,
+      "text": "as"
+    },
+    {
+      "x": 26.0,
+      "y": 220.0,
+      "width": 131.508,
+      "text": "something you"
+    },
+    {
+      "x": 26.0,
+      "y": 248.0,
+      "width": 168.03,
+      "text": "ask the DOM about"
+    },
+    {
+      "x": 26.0,
+      "y": 276.0,
+      "width": 263.106,
+      "text": "after the fact. If a layout needs"
+    },
+    {
+      "x": 26.0,
+      "y": 304.0,
+      "width": 279.036,
+      "text": "the real height of a paragraph, it"
+    },
+    {
+      "x": 26.0,
+      "y": 332.0,
+      "width": 284.706,
+      "text": "has to trigger measurement, and"
+    },
+    {
+      "x": 26.0,
+      "y": 360.0,
+      "width": 277.668,
+      "text": "measurement is usually coupled"
+    },
+    {
+      "x": 26.0,
+      "y": 388.0,
+      "width": 279.648,
+      "text": "to reflow. That is fine for a single"
+    },
+    {
+      "x": 26.0,
+      "y": 416.0,
+      "width": 279.162,
+      "text": "article paragraph and disastrous"
+    },
+    {
+      "x": 26.0,
+      "y": 444.0,
+      "width": 281.826,
+      "text": "for interactive systems that need"
+    },
+    {
+      "x": 26.0,
+      "y": 472.0,
+      "width": 266.76,
+      "text": "to measure hundreds of blocks"
+    },
+    {
+      "x": 26.0,
+      "y": 500.0,
+      "width": 274.176,
+      "text": "before deciding where anything"
+    },
+    {
+      "x": 26.0,
+      "y": 528.0,
+      "width": 219.006,
+      "text": "goes. The argument for a"
+    },
+    {
+      "x": 26.0,
+      "y": 556.0,
+      "width": 239.148,
+      "text": "dedicated text engine is not"
+    },
+    {
+      "x": 26.0,
+      "y": 584.0,
+      "width": 291.78,
+      "text": "aesthetic first. It is computational."
+    },
+    {
+      "x": 26.0,
+      "y": 612.0,
+      "width": 272.826,
+      "text": "Once shaping and line breaking"
+    },
+    {
+      "x": 26.0,
+      "y": 640.0,
+      "width": 289.926,
+      "text": "are prepared, the remaining work"
+    },
+    {
+      "x": 344.0,
+      "y": 136.0,
+      "width": 259.128,
+      "text": "should be arithmetic: advance"
+    },
+    {
+      "x": 344.0,
+      "y": 164.0,
+      "width": 242.46,
+      "text": "widths, break opportunities,"
+    },
+    {
+      "x": 344.0,
+      "y": 192.0,
+      "width": 252.954,
+      "text": "obstacle intervals, and cursor"
+    },
+    {
+      "x": 344.0,
+      "y": 220.0,
+      "width": 285.048,
+      "text": "movement. The cost should scale"
+    },
+    {
+      "x": 344.0,
+      "y": 248.0,
+      "width": 178.416,
+      "text": "with the text you are"
+    },
+    {
+      "x": 344.0,
+      "y": 276.0,
+      "width": 167.742,
+      "text": "laying out, not with"
+    },
+    {
+      "x": 344.0,
+      "y": 304.0,
+      "width": 136.998,
+      "text": "every unrelated"
+    },
+    {
+      "x": 344.0,
+      "y": 332.0,
+      "width": 133.38,
+      "text": "element on the"
+    },
+    {
+      "x": 344.0,
+      "y": 360.0,
+      "width": 126.504,
+      "text": "page. Editorial"
+    },
+    {
+      "x": 344.0,
+      "y": 388.0,
+      "width": 291.636,
+      "text": "composition exposes the problem"
+    },
+    {
+      "x": 344.0,
+      "y": 416.0,
+      "width": 267.498,
+      "text": "immediately. As soon as a drop"
+    },
+    {
+      "x": 344.0,
+      "y": 444.0,
+      "width": 283.59,
+      "text": "cap, a pull quote, or an animated"
+    },
+    {
+      "x": 344.0,
+      "y": 472.0,
+      "width": 263.826,
+      "text": "object intrudes on the column,"
+    },
+    {
+      "x": 344.0,
+      "y": 500.0,
+      "width": 262.782,
+      "text": "CSS either gives up or asks the"
+    },
+    {
+      "x": 344.0,
+      "y": 528.0,
+      "width": 268.434,
+      "text": "browser to do expensive layout"
+    },
+    {
+      "x": 344.0,
+      "y": 556.0,
+      "width": 281.538,
+      "text": "work you cannot directly control."
+    },
+    {
+      "x": 344.0,
+      "y": 584.0,
+      "width": 272.97,
+      "text": "The geometry becomes opaque"
+    },
+    {
+      "x": 344.0,
+      "y": 612.0,
+      "width": 281.304,
+      "text": "precisely when you need it most."
+    },
+    {
+      "x": 344.0,
+      "y": 640.0,
+      "width": 280.386,
+      "text": "This demo keeps the text stream"
+    },
+    {
+      "x": 662.0,
+      "y": 136.0,
+      "width": 289.044,
+      "text": "continuous across three columns."
+    },
+    {
+      "x": 662.0,
+      "y": 164.0,
+      "width": 141.966,
+      "text": "The first column"
+    },
+    {
+      "x": 662.0,
+      "y": 192.0,
+      "width": 126.342,
+      "text": "owns the drop"
+    },
+    {
+      "x": 925.0,
+      "y": 276.0,
+      "width": 18.738,
+      "text": "ca"
+    },
+    {
+      "x": 925.0,
+      "y": 304.0,
+      "width": 20.574,
+      "text": "p,"
+    },
+    {
+      "x": 925.0,
+      "y": 332.0,
+      "width": 27.774,
+      "text": "the"
+    },
+    {
+      "x": 662.0,
+      "y": 360.0,
+      "width": 282.582,
+      "text": "final column reserves space for a"
+    },
+    {
+      "x": 662.0,
+      "y": 388.0,
+      "width": 275.346,
+      "text": "pull quote, and translucent orbs"
+    },
+    {
+      "x": 662.0,
+      "y": 416.0,
+      "width": 257.112,
+      "text": "carve circular exclusion bands"
+    },
+    {
+      "x": 662.0,
+      "y": 444.0,
+      "width": 273.672,
+      "text": "through whichever column they"
+    },
+    {
+      "x": 662.0,
+      "y": 472.0,
+      "width": 262.314,
+      "text": "overlap. Each column resumes"
+    },
+    {
+      "x": 662.0,
+      "y": 500.0,
+      "width": 273.276,
+      "text": "from the cursor returned by the"
+    },
+    {
+      "x": 662.0,
+      "y": 528.0,
+      "width": 232.146,
+      "text": "previous one, so the article"
+    },
+    {
+      "x": 662.0,
+      "y": 556.0,
+      "width": 266.202,
+      "text": "remains a single logical stream"
+    },
+    {
+      "x": 662.0,
+      "y": 584.0,
+      "width": 271.872,
+      "text": "even though the visual layout is"
+    },
+    {
+      "x": 662.0,
+      "y": 612.0,
+      "width": 286.362,
+      "text": "fragmented. The key engineering"
+    },
+    {
+      "x": 662.0,
+      "y": 640.0,
+      "width": 236.232,
+      "text": "detail is that animation and"
+    }
+  ],
+  "pull_quote_lines": [
+    {
+      "x": 685.36,
+      "y": 234.28,
+      "width": 203.205,
+      "text": "\"Animation and reflow"
+    },
+    {
+      "x": 685.36,
+      "y": 258.28,
+      "width": 195.168,
+      "text": "should be coupled by"
+    },
+    {
+      "x": 685.36,
+      "y": 282.28,
+      "width": 157.016,
+      "text": "geometry, not by"
+    },
+    {
+      "x": 685.36,
+      "y": 306.28,
+      "width": 143.051,
+      "text": "incidental DOM"
+    },
+    {
+      "x": 685.36,
+      "y": 330.28,
+      "width": 138.092,
+      "text": "measurement.\""
+    }
+  ]
+}

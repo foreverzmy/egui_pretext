@@ -1,0 +1,22 @@
+{
+  "height": 88.0,
+  "line_count": 4,
+  "lines": [
+    {
+      "text": "Keep NBSP and",
+      "width": 120.0
+    },
+    {
+      "text": "wordjoiner plus",
+      "width": 121.68
+    },
+    {
+      "text": "zerowidth breaks",
+      "width": 133.056
+    },
+    {
+      "text": "available",
+      "width": 66.304
+    }
+  ]
+}

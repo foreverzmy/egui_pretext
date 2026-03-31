@@ -1,0 +1,19 @@
+[package]
+name = "pretext-demo-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+image.workspace = true
+parking_lot.workspace = true
+pretext = { path = "../../crates/pretext" }
+resvg.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia.workspace = true
+ttf-parser.workspace = true
+unicode-segmentation.workspace = true

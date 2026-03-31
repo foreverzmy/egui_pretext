@@ -1,0 +1,22 @@
+{
+  "height": 88.0,
+  "line_count": 4,
+  "lines": [
+    {
+      "text": "The layout engine",
+      "width": 138.688
+    },
+    {
+      "text": "should keep English",
+      "width": 154.432
+    },
+    {
+      "text": "prose stable across",
+      "width": 148.336
+    },
+    {
+      "text": "wraps.",
+      "width": 49.632
+    }
+  ]
+}

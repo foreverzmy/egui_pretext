@@ -1,0 +1,21 @@
+# Font Sources
+
+- `NotoSans-Regular.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf`
+- `NotoSansArabic-Regular.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf`
+- `NotoSansCJK-Regular.ttc`
+  - `https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTC/NotoSansCJK-Regular.ttc`
+- `NotoSansMyanmar-Regular.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSansMyanmar/NotoSansMyanmar-Regular.ttf`
+- `NotoSansMono-Regular.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSansMono/NotoSansMono-Regular.ttf`
+- `Noto-COLRv1.ttf`
+  - `https://raw.githubusercontent.com/googlefonts/noto-emoji/main/fonts/Noto-COLRv1.ttf`
+  - Wired into both the layout engine and the `egui` UI stack so emoji measurement and visible rendering use the same source font.
+- `../emoji_u1f680.svg`
+  - `https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f680.svg`
+  - Used as an inline SVG fallback for the rocket emoji in the accordion demo, because the current `egui` text path still drops visible emoji glyphs in that view.
+- `../emoji_u1f389.svg`
+  - `https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f389.svg`
+  - Used as an inline SVG fallback for the party popper emoji in the bubbles demo, for the same reason.

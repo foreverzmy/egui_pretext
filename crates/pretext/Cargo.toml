@@ -1,0 +1,23 @@
+[package]
+name = "pretext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ahash.workspace = true
+fontdb.workspace = true
+icu_locale.workspace = true
+icu_segmenter.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
+rustybuzz.workspace = true
+ttf-parser.workspace = true
+unicode-bidi.workspace = true
+unicode-linebreak.workspace = true
+unicode-script.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

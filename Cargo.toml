@@ -1,0 +1,42 @@
+[workspace]
+members = [
+    "crates/pretext",
+    "demos/app",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+# GUI
+eframe = "0.33.3"
+egui = "0.33.3"
+
+# Font shaping / font discovery
+rustybuzz = "0.20.1"
+ttf-parser = "0.25.1"
+fontdb = "0.23.0"
+
+# Unicode text processing
+unicode-segmentation = "1.13.2"
+unicode-bidi = "0.3.18"
+unicode-linebreak = "0.1.5"
+unicode-script = "0.5.7"
+icu_locale = "2.1.1"
+icu_segmenter = "2.1.2"
+
+# SVG / images
+resvg = "0.47.0"
+tiny-skia = "0.12.0"
+image = "0.25.10"
+
+# Utilities
+lru = "0.16.3"
+ahash = "0.8.12"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+parking_lot = "0.12.5"
+bytemuck = "1.25.0"
