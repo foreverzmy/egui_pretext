@@ -2,6 +2,12 @@
 
 - `NotoSans-Regular.ttf`
   - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf`
+- `NotoSerif-Regular.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSerif/NotoSerif-Regular.ttf`
+- `NotoSerif-Italic.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSerif/NotoSerif-Italic.ttf`
+- `NotoSerif-Bold.ttf`
+  - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSerif/NotoSerif-Bold.ttf`
 - `NotoSansArabic-Regular.ttf`
   - `https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf`
 - `NotoSansCJK-Regular.ttc`

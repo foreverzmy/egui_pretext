@@ -10,8 +10,7 @@ pub mod variable_typographic_ascii;
 
 use eframe::egui;
 use pretext::PretextEngine;
-
-use crate::assets::AssetRegistry;
+use pretext_egui::AssetRegistry;
 
 pub trait DemoWindow {
     fn title(&self) -> &str;

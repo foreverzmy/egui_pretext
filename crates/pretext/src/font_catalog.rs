@@ -74,8 +74,8 @@ pub struct FontCatalog {
     db: Database,
     faces: Vec<FontId>,
     default_face: Option<FontId>,
-    char_to_font: AHashMap<char, FontId>,
-    face_coverage: AHashMap<FontId, Arc<[CoverageRange]>>,
+    char_to_font: RwLock<AHashMap<char, FontId>>,
+    face_coverage: RwLock<AHashMap<FontId, Arc<[CoverageRange]>>>,
     loaded_faces: RwLock<AHashMap<FontId, Arc<LoadedFace>>>,
 }
 
@@ -110,13 +110,13 @@ impl FontCatalog {
     pub fn build(db: &Database) -> Self {
         let faces: Vec<FontId> = db.faces().map(|face| face.id).collect();
         let default_face = faces.first().copied();
-        let (char_to_font, face_coverage) = build_coverage_maps(db, &faces);
+        let (char_to_font, face_coverage) = build_prewarmed_coverage_maps(db, &faces);
         Self {
             db: db.clone(),
             faces,
             default_face,
-            char_to_font,
-            face_coverage,
+            char_to_font: RwLock::new(char_to_font),
+            face_coverage: RwLock::new(face_coverage),
             loaded_faces: RwLock::new(AHashMap::new()),
         }
     }
@@ -166,7 +166,11 @@ impl FontCatalog {
             }
         }
 
-        self.char_to_font.get(&ch).copied().or(self.default_face)
+        if let Some(id) = self.char_to_font.read().get(&ch).copied() {
+            return Some(id);
+        }
+
+        self.find_fallback_font_for_char(ch)
     }
 
     pub fn face_for_char(&self, ch: char, preferred: &[FontId]) -> Option<Arc<LoadedFace>> {
@@ -191,33 +195,31 @@ impl FontCatalog {
         run_text: &str,
         preferred: &[FontId],
     ) -> Option<Arc<LoadedFace>> {
-        let mut best: Option<(usize, Arc<LoadedFace>)> = None;
+        let mut best: Option<(usize, FontId)> = None;
         let chars: Vec<char> = run_text.chars().collect();
 
         for id in self.candidate_ids(preferred) {
-            let Some(face) = self.load_face(id) else {
-                continue;
-            };
             let score = chars
                 .iter()
                 .filter(|&&ch| self.face_covers_char(id, ch))
                 .count();
             if score == chars.len() {
-                return Some(face);
+                return self.load_face(id).or_else(|| self.default_face());
             }
             if best
                 .as_ref()
                 .map(|(best_score, _)| score > *best_score)
                 .unwrap_or(true)
             {
-                best = Some((score, face));
+                best = Some((score, id));
             }
         }
 
-        best.map(|(_, face)| face).or_else(|| self.default_face())
+        best.and_then(|(_, id)| self.load_face(id))
+            .or_else(|| self.default_face())
     }
 
-    pub(crate) fn load_face(&self, id: FontId) -> Option<Arc<LoadedFace>> {
+    pub fn load_face(&self, id: FontId) -> Option<Arc<LoadedFace>> {
         if let Some(face) = self.loaded_faces.read().get(&id) {
             return Some(face.clone());
         }
@@ -256,6 +258,21 @@ impl FontCatalog {
         self.default_face.and_then(|id| self.load_face(id))
     }
 
+    fn find_fallback_font_for_char(&self, ch: char) -> Option<FontId> {
+        let fallback = self
+            .faces
+            .iter()
+            .copied()
+            .find(|id| self.face_covers_char(*id, ch))
+            .or(self.default_face);
+
+        if let Some(id) = fallback {
+            self.char_to_font.write().entry(ch).or_insert(id);
+        }
+
+        fallback
+    }
+
     fn face_covers_cluster(&self, id: FontId, cluster: &str) -> bool {
         cluster.chars().all(|ch| self.face_covers_char(id, ch))
     }
@@ -265,14 +282,40 @@ impl FontCatalog {
             return true;
         }
 
-        self.face_coverage
-            .get(&id)
+        self.coverage_ranges_for_face(id)
+            .as_deref()
             .map(|ranges| coverage_contains(ranges, ch))
             .unwrap_or_else(|| {
                 self.load_face(id)
                     .map(|face| face.has_glyph(ch))
                     .unwrap_or(false)
             })
+    }
+
+    fn coverage_ranges_for_face(&self, id: FontId) -> Option<Arc<[CoverageRange]>> {
+        if let Some(ranges) = self.face_coverage.read().get(&id).cloned() {
+            return Some(ranges);
+        }
+
+        let entry = coverage_entry_for_face(&self.db, id)?;
+        {
+            let mut face_coverage = self.face_coverage.write();
+            if let Some(ranges) = face_coverage.get(&id).cloned() {
+                return Some(ranges);
+            }
+            face_coverage.insert(id, entry.ranges.clone());
+        }
+        self.seed_char_to_font(id, entry.codepoints.as_ref());
+        Some(entry.ranges.clone())
+    }
+
+    fn seed_char_to_font(&self, id: FontId, codepoints: &[u32]) {
+        let mut char_to_font = self.char_to_font.write();
+        for &codepoint in codepoints {
+            if let Some(ch) = char::from_u32(codepoint) {
+                char_to_font.entry(ch).or_insert(id);
+            }
+        }
     }
 }
 
@@ -286,7 +329,7 @@ fn coverage_cache() -> &'static RwLock<AHashMap<CoverageCacheKey, Arc<CoverageCa
     CACHE.get_or_init(|| RwLock::new(AHashMap::new()))
 }
 
-fn build_coverage_maps(
+fn build_prewarmed_coverage_maps(
     db: &Database,
     faces: &[FontId],
 ) -> (
@@ -297,6 +340,10 @@ fn build_coverage_maps(
     let mut face_coverage = AHashMap::new();
 
     for id in faces {
+        if !should_prewarm_face(db, *id) {
+            continue;
+        }
+
         let Some(entry) = coverage_entry_for_face(db, *id) else {
             continue;
         };
@@ -311,6 +358,10 @@ fn build_coverage_maps(
     }
 
     (char_to_font, face_coverage)
+}
+
+fn should_prewarm_face(db: &Database, id: FontId) -> bool {
+    matches!(db.face(id), Some(face) if matches!(&face.source, Source::Binary(_)))
 }
 
 fn coverage_entry_for_face(db: &Database, id: FontId) -> Option<Arc<CoverageCacheEntry>> {
@@ -433,4 +484,105 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut state = ahash::AHasher::default();
     bytes.hash(&mut state);
     state.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bundled_font_data() -> Vec<Vec<u8>> {
+        vec![
+            include_bytes!("../../../demos/app/assets/fonts/NotoSans-Regular.ttf").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/NotoSansArabic-Regular.ttf").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/NotoSansCJK-Regular.ttc").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/NotoSansMyanmar-Regular.ttf").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/Noto-COLRv1.ttf").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/NotoSansMono-Regular.ttf").to_vec(),
+        ]
+    }
+
+    fn file_backed_face_with_glyph(catalog: &FontCatalog, ch: char) -> Option<FontId> {
+        catalog.faces.iter().copied().find(|id| {
+            let Some(face_info) = catalog.db.face(*id) else {
+                return false;
+            };
+            if !matches!(
+                &face_info.source,
+                Source::File(_) | Source::SharedFile(_, _)
+            ) {
+                return false;
+            }
+
+            catalog
+                .db
+                .with_face_data(*id, |data, face_index| {
+                    ttf_parser::Face::parse(data, face_index)
+                        .ok()
+                        .and_then(|face| face.glyph_index(ch))
+                        .is_some()
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn build_only_prewarms_binary_face_coverage() {
+        let catalog = FontCatalog::with_font_data_and_system_fonts(bundled_font_data(), true);
+        let expected_binary_count = catalog
+            .faces
+            .iter()
+            .copied()
+            .filter(|id| should_prewarm_face(&catalog.db, *id))
+            .count();
+
+        assert_eq!(catalog.face_coverage.read().len(), expected_binary_count);
+
+        if let Some(file_backed) = file_backed_face_with_glyph(&catalog, 'A') {
+            assert!(!catalog.face_coverage.read().contains_key(&file_backed));
+        }
+    }
+
+    #[test]
+    fn file_backed_face_coverage_is_built_lazily() {
+        let catalog = FontCatalog::with_font_data_and_system_fonts(bundled_font_data(), true);
+        let Some(file_backed) = file_backed_face_with_glyph(&catalog, 'A') else {
+            return;
+        };
+
+        let before = catalog.face_coverage.read().len();
+        assert!(!catalog.face_coverage.read().contains_key(&file_backed));
+        assert!(catalog.face_covers_char(file_backed, 'A'));
+        assert!(catalog.face_coverage.read().contains_key(&file_backed));
+        assert_eq!(catalog.face_coverage.read().len(), before + 1);
+    }
+
+    #[test]
+    fn best_face_for_run_only_loads_selected_face_data() {
+        let catalog = FontCatalog::with_font_data_and_system_fonts(bundled_font_data(), true);
+        let style = TextStyleSpec {
+            families: vec![
+                "Helvetica".to_owned(),
+                "Arial".to_owned(),
+                "Noto Sans".to_owned(),
+            ],
+            size_px: 16.0,
+            weight: 400,
+            italic: false,
+        };
+        let preferred = catalog.resolve_style_chain(&style);
+
+        assert_eq!(catalog.loaded_faces.read().len(), 0);
+        let face = catalog
+            .best_face_for_run("Hello", &preferred)
+            .expect("expected a face for ASCII run");
+        let cached = catalog
+            .loaded_faces
+            .read()
+            .get(&face.id())
+            .cloned()
+            .expect("expected the selected face to be cached");
+
+        assert_eq!(catalog.loaded_faces.read().len(), 1);
+        assert!(Arc::ptr_eq(&cached, &face));
+    }
 }

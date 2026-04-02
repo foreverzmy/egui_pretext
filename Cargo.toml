@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/pretext",
+    "crates/pretext-render",
+    "crates/pretext-egui",
     "demos/app",
 ]
 resolver = "2"
@@ -40,3 +42,32 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 parking_lot = "0.12.5"
 bytemuck = "1.25.0"
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true
+
+[profile.dev.package.pretext]
+opt-level = 3
+
+[profile.dev.package.pretext-render]
+opt-level = 3
+
+[profile.dev.package.pretext-egui]
+opt-level = 3
+
+[profile.dev.package.rustybuzz]
+opt-level = 3
+
+[profile.dev.package.ttf-parser]
+opt-level = 3
+
+[profile.dev.package.fontdb]
+opt-level = 3
+
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+[profile.dev.package.resvg]
+opt-level = 3

@@ -8,12 +8,11 @@ build = "build.rs"
 [dependencies]
 eframe.workspace = true
 egui.workspace = true
-image.workspace = true
-parking_lot.workspace = true
 pretext = { path = "../../crates/pretext" }
+pretext-render = { path = "../../crates/pretext-render" }
+pretext-egui = { path = "../../crates/pretext-egui" }
 resvg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tiny-skia.workspace = true
-ttf-parser.workspace = true
 unicode-segmentation.workspace = true

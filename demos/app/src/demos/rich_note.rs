@@ -1,14 +1,20 @@
 use eframe::egui;
-use egui::{Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Stroke, StrokeKind};
+use egui::{
+    Align, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, StrokeKind, UiBuilder,
+};
 #[cfg(test)]
 use pretext::BidiDirection;
 use pretext::{
     LayoutCursor, LayoutLineVisualRun, PrepareOptions, PreparedTextWithSegments, PretextEngine,
     WhiteSpaceMode,
 };
+use pretext_egui::{
+    shaped_text_baseline_metrics, AssetRegistry, BaselineMetrics, BaselineMode, EmojiAssetId,
+    ShapedTextRasterRequest,
+};
+use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
 
-use crate::assets::AssetRegistry;
-use crate::demos::text_runs::paint_visual_runs;
 use crate::demos::DemoWindow;
 
 const LINE_START_CURSOR: LayoutCursor = LayoutCursor {
@@ -19,20 +25,58 @@ const LINE_START_CURSOR: LayoutCursor = LayoutCursor {
 const LINE_HEIGHT: f32 = 34.0;
 const LAST_LINE_BLOCK_HEIGHT: f32 = 24.0;
 const NOTE_SHELL_CHROME_X: f32 = 40.0;
-const NOTE_TOP_PADDING: f32 = 24.0;
-const NOTE_BOTTOM_PADDING: f32 = 18.0;
+const PAGE_MAX_WIDTH: f32 = 940.0;
+const INTRO_MAX_WIDTH: f32 = 720.0;
+const NOTE_SHELL_PADDING: i8 = 20;
 const BODY_MIN_WIDTH: f32 = 260.0;
 const BODY_DEFAULT_WIDTH: f32 = 516.0;
 const BODY_MAX_WIDTH: f32 = 760.0;
 const PAGE_MARGIN: f32 = 28.0;
+const DESKTOP_PAGE_GUTTER: f32 = 32.0;
+const MOBILE_PAGE_GUTTER: f32 = 20.0;
+const MOBILE_BREAKPOINT: f32 = 640.0;
 const CHIP_CHROME_WIDTH: f32 = 22.0;
 const CODE_CHROME_WIDTH: f32 = 14.0;
 const UNBOUNDED_WIDTH: f32 = 100_000.0;
+const BODY_TEXT_SIZE: f32 = 17.0;
+const LINK_TEXT_SIZE: f32 = 17.0;
+const CODE_TEXT_SIZE: f32 = 14.0;
+const CHIP_TEXT_SIZE: f32 = 12.0;
+const LINK_UNDERLINE_Y: f32 = 18.0;
+const CODE_BOX_Y: f32 = 2.0;
+const CODE_BOX_HEIGHT: f32 = 19.0;
+const CHIP_BOX_Y: f32 = 1.0;
+const CHIP_BOX_HEIGHT: f32 = 24.0;
+const SHAPED_TEXT_PAD_X: f32 = 2.0;
+const SHAPED_TEXT_PAD_Y: f32 = 2.0;
+
+const PAGE_TOP_FILL: Color32 = Color32::from_rgb(251, 247, 240);
+const PAGE_FILL: Color32 = Color32::from_rgb(245, 241, 234);
+const TOOLBAR_FILL: Color32 = Color32::from_rgb(255, 253, 249);
+const NOTE_FILL: Color32 = Color32::from_rgb(255, 253, 248);
+const INK: Color32 = Color32::from_rgb(32, 27, 24);
+const MUTED: Color32 = Color32::from_rgb(109, 100, 93);
+const RULE: Color32 = Color32::from_rgb(216, 206, 195);
+const ACCENT: Color32 = Color32::from_rgb(149, 95, 59);
+const CODE_FILL: Color32 = Color32::from_rgba_premultiplied(17, 31, 43, 20);
+const TOOLBAR_SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
+    offset: [0, 18],
+    blur: 40,
+    spread: 0,
+    color: Color32::from_rgba_premultiplied(54, 40, 23, 20),
+};
+const NOTE_SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
+    offset: [0, 18],
+    blur: 40,
+    spread: 0,
+    color: Color32::from_rgba_premultiplied(54, 40, 23, 20),
+};
 
 pub struct RichNoteDemo {
     open: bool,
     requested_width: f32,
     items: Option<Vec<InlineItem>>,
+    layout_cache: Option<CachedRichNoteLayout>,
 }
 
 impl Default for RichNoteDemo {
@@ -41,6 +85,7 @@ impl Default for RichNoteDemo {
             open: false,
             requested_width: BODY_DEFAULT_WIDTH,
             items: None,
+            layout_cache: None,
         }
     }
 }
@@ -73,10 +118,16 @@ enum ChipTone {
     Count,
 }
 
+#[derive(Clone, Copy)]
+struct FragmentPaintMetrics {
+    slot_top: f32,
+    slot_height: f32,
+}
+
 struct TextStyleModel {
     style_name: TextStyleName,
     chrome_width: f32,
-    spec: pretext::TextStyleSpec,
+    spec: &'static pretext::TextStyleSpec,
 }
 
 #[derive(Clone)]
@@ -129,6 +180,12 @@ struct LineFragment {
 #[derive(Clone, Debug, PartialEq)]
 struct RichLine {
     fragments: Vec<LineFragment>,
+}
+
+struct CachedRichNoteLayout {
+    body_width_px: u32,
+    note_body_height: f32,
+    lines: Vec<RichLine>,
 }
 
 const INLINE_SPECS: &[RichInlineSpec] = &[
@@ -236,7 +293,7 @@ const INLINE_SPECS: &[RichInlineSpec] = &[
 
 impl DemoWindow for RichNoteDemo {
     fn title(&self) -> &str {
-        "Rich Note"
+        "Rich Text"
     }
 
     fn is_open(&self) -> bool {
@@ -247,53 +304,84 @@ impl DemoWindow for RichNoteDemo {
         self.open = open;
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, _assets: &mut AssetRegistry) {
+    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(860.0, 520.0))
+            .default_size(egui::vec2(980.0, 720.0))
             .show(ctx, |ui| {
-                let raw_max_body = ui.available_width() - NOTE_SHELL_CHROME_X - PAGE_MARGIN;
-                let max_body_width = raw_max_body.max(BODY_MIN_WIDTH).min(BODY_MAX_WIDTH);
-                let slider_max = max_body_width.max(BODY_MIN_WIDTH);
-                ui.add(
-                    egui::Slider::new(&mut self.requested_width, BODY_MIN_WIDTH..=slider_max)
-                        .text("Body width"),
-                );
-
-                let body_width = self.requested_width.clamp(BODY_MIN_WIDTH, slider_max);
-                self.requested_width = body_width;
-
-                let items = self.ensure_items(engine);
-                let lines = layout_inline_items(engine, items, body_width);
-                let line_count = lines.len();
-                let note_body_height = if line_count == 0 {
-                    LAST_LINE_BLOCK_HEIGHT
-                } else {
-                    (line_count as f32 - 1.0) * LINE_HEIGHT + LAST_LINE_BLOCK_HEIGHT
-                };
-                let note_width = body_width + NOTE_SHELL_CHROME_X;
-                let note_height = note_body_height + NOTE_TOP_PADDING + NOTE_BOTTOM_PADDING;
-
-                ui.horizontal(|ui| {
-                    ui.label(format!("{line_count} lines"));
-                    ui.separator();
-                    ui.label(format!("{:.0}px note width", note_width));
-                });
-                ui.add_space(12.0);
-
-                ui.horizontal_centered(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(note_width, note_height), Sense::hover());
-                    paint_rich_note(ui.painter(), rect, &lines);
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.render_page(ui, ctx, engine, assets);
+                    });
             });
         self.open = open;
     }
 }
 
 impl RichNoteDemo {
+    fn render_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut AssetRegistry,
+    ) {
+        let outer_width = ui.available_width().max(320.0);
+        let page_gutter = if outer_width <= MOBILE_BREAKPOINT {
+            MOBILE_PAGE_GUTTER
+        } else {
+            DESKTOP_PAGE_GUTTER
+        };
+        let page_width = (outer_width - page_gutter).min(PAGE_MAX_WIDTH).max(280.0);
+        let raw_max_body = outer_width - PAGE_MARGIN * 2.0 - NOTE_SHELL_CHROME_X;
+        let max_body_width = raw_max_body.max(BODY_MIN_WIDTH).min(BODY_MAX_WIDTH).floor();
+        let mut requested_width = self
+            .requested_width
+            .clamp(BODY_MIN_WIDTH, max_body_width)
+            .round();
+
+        ui.scope_builder(
+            UiBuilder::new().layout(Layout::top_down(Align::Center)),
+            |ui| {
+                ui.set_min_width(page_width);
+                ui.set_max_width(page_width);
+                ui.set_width(page_width);
+
+                let page_rect = ui.max_rect();
+                paint_page_backdrop(ui.painter(), page_rect);
+
+                ui.scope_builder(
+                    UiBuilder::new().layout(Layout::top_down(Align::Min)),
+                    |ui| {
+                        paint_intro(ui);
+                        ui.add_space(20.0);
+                        paint_toolbar(ui, outer_width, &mut requested_width, max_body_width);
+                        ui.add_space(24.0);
+                        let body_width = requested_width
+                            .clamp(BODY_MIN_WIDTH, max_body_width)
+                            .round();
+                        self.ensure_items(engine);
+                        let layout = self.ensure_layout(engine, body_width);
+                        paint_preview(
+                            ui,
+                            ctx,
+                            engine,
+                            assets,
+                            body_width,
+                            layout.note_body_height,
+                            &layout.lines,
+                        );
+                    },
+                );
+            },
+        );
+
+        self.requested_width = requested_width.clamp(BODY_MIN_WIDTH, max_body_width);
+    }
+
     fn ensure_items(&mut self, engine: &PretextEngine) -> &[InlineItem] {
         if self.items.is_none() {
             self.items = Some(prepare_inline_items(engine, INLINE_SPECS));
@@ -303,6 +391,177 @@ impl RichNoteDemo {
             .as_deref()
             .expect("rich note items should be prepared")
     }
+
+    fn ensure_layout(&mut self, engine: &PretextEngine, body_width: f32) -> &CachedRichNoteLayout {
+        let body_width_px = body_width.max(1.0).round() as u32;
+        let should_rebuild = self
+            .layout_cache
+            .as_ref()
+            .is_none_or(|cache| cache.body_width_px != body_width_px);
+
+        if should_rebuild {
+            let lines = {
+                let items = self
+                    .items
+                    .as_deref()
+                    .expect("rich note items should be prepared before layout");
+                layout_inline_items(engine, items, body_width)
+            };
+            let line_count = lines.len();
+            let note_body_height = if line_count == 0 {
+                LAST_LINE_BLOCK_HEIGHT
+            } else {
+                (line_count as f32 - 1.0) * LINE_HEIGHT + LAST_LINE_BLOCK_HEIGHT
+            };
+            self.layout_cache = Some(CachedRichNoteLayout {
+                body_width_px,
+                note_body_height,
+                lines,
+            });
+        }
+
+        self.layout_cache
+            .as_ref()
+            .expect("rich note layout cache should be populated")
+    }
+}
+
+fn paint_page_backdrop(painter: &egui::Painter, rect: Rect) {
+    painter.rect_filled(rect, CornerRadius::ZERO, PAGE_FILL);
+    painter.circle_filled(
+        egui::pos2(rect.center().x, rect.top() - rect.height() * 0.18),
+        rect.width() * 0.52,
+        PAGE_TOP_FILL,
+    );
+}
+
+fn paint_intro(ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new("Demo")
+            .monospace()
+            .size(12.0)
+            .color(ACCENT)
+            .strong(),
+    );
+    ui.add_space(8.0);
+    ui.label(RichText::new("Rich Text").size(34.0).color(INK).strong());
+    ui.add_space(10.0);
+    ui.scope(|ui| {
+        ui.set_max_width(INTRO_MAX_WIDTH);
+        ui.label(
+            RichText::new(
+                "Rich text rendered as text runs, links, code spans, and atomic chips. Adjust the text width to watch the chips stay whole while the surrounding text and code keep wrapping naturally when space gets tight.",
+            )
+            .size(15.0)
+            .color(MUTED),
+        );
+    });
+}
+
+fn paint_toolbar(
+    ui: &mut egui::Ui,
+    outer_width: f32,
+    requested_width: &mut f32,
+    max_body_width: f32,
+) {
+    egui::Frame::new()
+        .fill(TOOLBAR_FILL)
+        .stroke(Stroke::new(1.0, RULE))
+        .corner_radius(CornerRadius::same(18))
+        .shadow(TOOLBAR_SHADOW)
+        .inner_margin(egui::Margin::symmetric(18, 16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let value_width = 64.0;
+            let value_label = RichText::new(format!("{:.0}px", requested_width.round()))
+                .size(13.0)
+                .color(MUTED)
+                .strong();
+            if outer_width <= MOBILE_BREAKPOINT {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new("Text Width")
+                            .monospace()
+                            .size(11.0)
+                            .color(MUTED)
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+                    let slider_width = ui.available_width().max(1.0);
+                    ui.scope(|ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(
+                            egui::Slider::new(requested_width, BODY_MIN_WIDTH..=max_body_width)
+                                .show_value(false)
+                                .step_by(1.0),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    ui.label(value_label);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Text Width")
+                            .monospace()
+                            .size(11.0)
+                            .color(MUTED)
+                            .strong(),
+                    );
+                    ui.add_space(14.0);
+                    let slider_width =
+                        (ui.available_width() - value_width - ui.spacing().item_spacing.x).max(1.0);
+                    ui.scope(|ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(
+                            egui::Slider::new(requested_width, BODY_MIN_WIDTH..=max_body_width)
+                                .show_value(false)
+                                .step_by(1.0),
+                        );
+                    });
+                    ui.add_sized(egui::vec2(value_width, 18.0), egui::Label::new(value_label));
+                });
+            }
+        });
+}
+
+fn paint_preview(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+    body_width: f32,
+    note_body_height: f32,
+    lines: &[RichLine],
+) {
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        let note_shell_width = note_shell_width(body_width);
+        ui.scope(|ui| {
+            ui.set_min_width(note_shell_width);
+            ui.set_max_width(note_shell_width);
+            ui.set_width(note_shell_width);
+            egui::Frame::new()
+                .fill(NOTE_FILL)
+                .stroke(Stroke::new(1.0, RULE))
+                .corner_radius(CornerRadius::same(20))
+                .shadow(NOTE_SHADOW)
+                .inner_margin(egui::Margin::same(NOTE_SHELL_PADDING))
+                .show(ui, |ui| {
+                    ui.set_min_width(body_width);
+                    ui.set_max_width(body_width);
+                    ui.set_width(body_width);
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(body_width, note_body_height.max(LAST_LINE_BLOCK_HEIGHT)),
+                        Sense::hover(),
+                    );
+                    paint_rich_note_body(ui.painter(), rect, lines, ctx, engine, assets);
+                });
+        });
+    });
+}
+
+fn note_shell_width(body_width: f32) -> f32 {
+    body_width + NOTE_SHELL_PADDING as f32 * 2.0
 }
 
 impl LineFragment {
@@ -316,59 +575,115 @@ fn text_style_model(style_name: TextStyleName) -> TextStyleModel {
         TextStyleName::Body => TextStyleModel {
             style_name,
             chrome_width: 0.0,
-            spec: pretext::TextStyleSpec {
-                families: vec![
-                    "Noto Sans".to_owned(),
-                    "Arial".to_owned(),
-                    "Helvetica".to_owned(),
-                ],
-                size_px: 17.0,
-                weight: 500,
-                italic: false,
-            },
+            spec: body_text_style(),
         },
         TextStyleName::Link => TextStyleModel {
             style_name,
             chrome_width: 0.0,
-            spec: pretext::TextStyleSpec {
-                families: vec![
-                    "Noto Sans".to_owned(),
-                    "Arial".to_owned(),
-                    "Helvetica".to_owned(),
-                ],
-                size_px: 17.0,
-                weight: 600,
-                italic: false,
-            },
+            spec: link_text_style(),
         },
         TextStyleName::Code => TextStyleModel {
             style_name,
             chrome_width: CODE_CHROME_WIDTH,
-            spec: pretext::TextStyleSpec {
-                families: vec![
-                    "Noto Sans Mono".to_owned(),
-                    "Menlo".to_owned(),
-                    "Monaco".to_owned(),
-                ],
-                size_px: 14.0,
-                weight: 600,
-                italic: false,
-            },
+            spec: code_text_style(),
         },
     }
 }
 
-fn chip_text_style() -> pretext::TextStyleSpec {
+fn build_text_style(
+    families: &[&str],
+    size_px: f32,
+    weight: u16,
+    italic: bool,
+) -> pretext::TextStyleSpec {
     pretext::TextStyleSpec {
-        families: vec![
-            "Noto Sans".to_owned(),
-            "Arial".to_owned(),
-            "Helvetica".to_owned(),
-        ],
-        size_px: 12.0,
-        weight: 700,
-        italic: false,
+        families: families.iter().map(|name| (*name).to_owned()).collect(),
+        size_px,
+        weight,
+        italic,
     }
+}
+
+fn body_text_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        build_text_style(
+            &[
+                "Helvetica Neue",
+                "Helvetica",
+                "Arial",
+                "Noto Sans",
+                "Noto Sans Arabic",
+                "Noto Sans CJK",
+                "Noto Emoji",
+                "Noto Color Emoji",
+            ],
+            BODY_TEXT_SIZE,
+            500,
+            false,
+        )
+    })
+}
+
+fn link_text_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        build_text_style(
+            &[
+                "Helvetica Neue",
+                "Helvetica",
+                "Arial",
+                "Noto Sans",
+                "Noto Sans Arabic",
+                "Noto Sans CJK",
+                "Noto Emoji",
+                "Noto Color Emoji",
+            ],
+            LINK_TEXT_SIZE,
+            600,
+            false,
+        )
+    })
+}
+
+fn code_text_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        build_text_style(
+            &[
+                "SF Mono",
+                "Menlo",
+                "Monaco",
+                "Noto Sans Mono",
+                "Noto Sans Arabic",
+                "Noto Sans CJK",
+            ],
+            CODE_TEXT_SIZE,
+            600,
+            false,
+        )
+    })
+}
+
+fn chip_text_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        build_text_style(
+            &[
+                "Helvetica Neue",
+                "Helvetica",
+                "Arial",
+                "Noto Sans",
+                "Noto Sans Arabic",
+                "Noto Sans CJK",
+                "Noto Emoji",
+                "Noto Color Emoji",
+            ],
+            CHIP_TEXT_SIZE,
+            700,
+            false,
+        )
+    })
 }
 
 fn normal_options() -> PrepareOptions {
@@ -395,7 +710,7 @@ fn measure_collapsed_space_width(engine: &PretextEngine, style: &pretext::TextSt
 
 fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec<InlineItem> {
     let inline_boundary_gap =
-        measure_collapsed_space_width(engine, &text_style_model(TextStyleName::Body).spec);
+        measure_collapsed_space_width(engine, text_style_model(TextStyleName::Body).spec);
     let mut items = Vec::new();
     let mut pending_gap = 0.0f32;
 
@@ -403,7 +718,7 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
         match *spec {
             RichInlineSpec::Chip { label, tone } => {
                 let label_prepared =
-                    engine.prepare_with_segments(label, &chip_text_style(), &normal_options());
+                    engine.prepare_with_segments(label, chip_text_style(), &normal_options());
                 let mut label_cursor = LINE_START_CURSOR;
                 let label_line = engine
                     .layout_next_line(&label_prepared, &mut label_cursor, UNBOUNDED_WIDTH)
@@ -439,11 +754,8 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
                 }
 
                 let style_model = text_style_model(style);
-                let prepared = engine.prepare_with_segments(
-                    trimmed_text,
-                    &style_model.spec,
-                    &normal_options(),
-                );
+                let prepared =
+                    engine.prepare_with_segments(trimmed_text, style_model.spec, &normal_options());
                 let mut cursor = LINE_START_CURSOR;
                 let Some(whole_line) =
                     engine.layout_next_line(&prepared, &mut cursor, UNBOUNDED_WIDTH)
@@ -617,38 +929,16 @@ fn fragment_kind_for_style(style_name: TextStyleName) -> FragmentKind {
     }
 }
 
-fn paint_rich_note(painter: &egui::Painter, rect: Rect, lines: &[RichLine]) {
-    painter.rect_filled(
-        rect,
-        CornerRadius::same(20),
-        Color32::from_rgb(248, 244, 238),
-    );
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(20),
-        Stroke::new(1.0, Color32::from_rgb(220, 210, 196)),
-        StrokeKind::Inside,
-    );
-
-    let rail_x = rect.left() + 14.0;
-    painter.line_segment(
-        [
-            egui::pos2(rail_x, rect.top() + 18.0),
-            egui::pos2(rail_x, rect.bottom() - 18.0),
-        ],
-        Stroke::new(2.0, Color32::from_rgb(228, 199, 145)),
-    );
-    painter.circle_filled(
-        egui::pos2(rail_x, rect.top() + 26.0),
-        4.0,
-        Color32::from_rgb(201, 134, 68),
-    );
-
-    let body_left = rect.left() + 22.0;
-    let body_top = rect.top() + NOTE_TOP_PADDING;
-    let body_font = FontId::new(17.0, FontFamily::Proportional);
-    let code_font = FontId::new(14.0, FontFamily::Monospace);
-    let chip_font = FontId::new(12.0, FontFamily::Proportional);
+fn paint_rich_note_body(
+    painter: &egui::Painter,
+    rect: Rect,
+    lines: &[RichLine],
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+) {
+    let body_left = rect.left();
+    let body_top = rect.top();
 
     for (line_index, line) in lines.iter().enumerate() {
         let mut x = body_left;
@@ -659,66 +949,64 @@ fn paint_rich_note(painter: &egui::Painter, rect: Rect, lines: &[RichLine]) {
 
             match fragment.kind {
                 FragmentKind::Body => {
-                    paint_visual_runs(
+                    let metrics = body_fragment_metrics(y);
+                    paint_fragment_runs(
                         painter,
                         x,
-                        y,
-                        &fragment.text,
-                        &fragment.visual_runs,
-                        &body_font,
-                        Color32::from_rgb(42, 47, 56),
+                        fragment,
+                        metrics,
+                        text_style_model(TextStyleName::Body).spec,
+                        INK,
+                        ctx,
+                        engine,
+                        assets,
                     );
                 }
                 FragmentKind::Link => {
-                    let color = Color32::from_rgb(45, 101, 193);
-                    paint_visual_runs(
+                    let metrics = body_fragment_metrics(y);
+                    paint_fragment_runs(
                         painter,
                         x,
-                        y,
-                        &fragment.text,
-                        &fragment.visual_runs,
-                        &body_font,
-                        color,
+                        fragment,
+                        metrics,
+                        text_style_model(TextStyleName::Link).spec,
+                        ACCENT,
+                        ctx,
+                        engine,
+                        assets,
                     );
                     painter.line_segment(
                         [
-                            egui::pos2(x, y + 20.0),
-                            egui::pos2(x + fragment.text_width, y + 20.0),
+                            egui::pos2(x, y + LINK_UNDERLINE_Y),
+                            egui::pos2(x + fragment.text_width, y + LINK_UNDERLINE_Y),
                         ],
-                        Stroke::new(1.0, color.gamma_multiply(0.8)),
+                        Stroke::new(1.0, ACCENT),
                     );
                 }
                 FragmentKind::Code => {
                     let box_rect = Rect::from_min_size(
-                        egui::pos2(x, y + 4.0),
-                        egui::vec2(fragment.total_width(), 24.0),
+                        egui::pos2(x, y + CODE_BOX_Y),
+                        egui::vec2(fragment.total_width(), CODE_BOX_HEIGHT),
                     );
-                    painter.rect_filled(
-                        box_rect,
-                        CornerRadius::same(8),
-                        Color32::from_rgb(235, 228, 214),
-                    );
-                    painter.rect_stroke(
-                        box_rect,
-                        CornerRadius::same(8),
-                        Stroke::new(1.0, Color32::from_rgb(220, 209, 187)),
-                        StrokeKind::Inside,
-                    );
-                    paint_visual_runs(
+                    painter.rect_filled(box_rect, CornerRadius::same(9), CODE_FILL);
+                    let metrics = code_fragment_metrics(y);
+                    paint_fragment_runs(
                         painter,
                         x + fragment.chrome_width * 0.5,
-                        y + 9.0,
-                        &fragment.text,
-                        &fragment.visual_runs,
-                        &code_font,
-                        Color32::from_rgb(90, 70, 40),
+                        fragment,
+                        metrics,
+                        text_style_model(TextStyleName::Code).spec,
+                        INK,
+                        ctx,
+                        engine,
+                        assets,
                     );
                 }
                 FragmentKind::Chip(tone) => {
                     let (fill, stroke, text_color) = chip_palette(tone);
                     let box_rect = Rect::from_min_size(
-                        egui::pos2(x, y + 5.0),
-                        egui::vec2(fragment.total_width(), 22.0),
+                        egui::pos2(x, y + CHIP_BOX_Y),
+                        egui::vec2(fragment.total_width(), CHIP_BOX_HEIGHT),
                     );
                     painter.rect_filled(box_rect, CornerRadius::same(11), fill);
                     painter.rect_stroke(
@@ -727,14 +1015,17 @@ fn paint_rich_note(painter: &egui::Painter, rect: Rect, lines: &[RichLine]) {
                         Stroke::new(1.0, stroke),
                         StrokeKind::Inside,
                     );
-                    paint_visual_runs(
+                    let metrics = chip_fragment_metrics(y);
+                    paint_fragment_runs(
                         painter,
                         x + fragment.chrome_width * 0.5,
-                        y + 9.0,
-                        &fragment.text,
-                        &fragment.visual_runs,
-                        &chip_font,
+                        fragment,
+                        metrics,
+                        chip_text_style(),
                         text_color,
+                        ctx,
+                        engine,
+                        assets,
                     );
                 }
             }
@@ -742,56 +1033,383 @@ fn paint_rich_note(painter: &egui::Painter, rect: Rect, lines: &[RichLine]) {
             x += fragment.total_width();
         }
     }
+}
 
-    painter.line_segment(
-        [
-            egui::pos2(body_left, rect.bottom() - 14.0),
-            egui::pos2(body_left + 72.0, rect.bottom() - 14.0),
-        ],
-        Stroke::new(1.5, Color32::from_rgb(217, 208, 194)),
-    );
+fn body_fragment_metrics(line_top: f32) -> FragmentPaintMetrics {
+    FragmentPaintMetrics {
+        slot_top: line_top,
+        slot_height: BODY_TEXT_SIZE,
+    }
+}
+
+fn code_fragment_metrics(line_top: f32) -> FragmentPaintMetrics {
+    let slot_top = line_top + CODE_BOX_Y;
+    FragmentPaintMetrics {
+        slot_top,
+        slot_height: CODE_BOX_HEIGHT,
+    }
+}
+
+fn chip_fragment_metrics(line_top: f32) -> FragmentPaintMetrics {
+    let slot_top = line_top + CHIP_BOX_Y;
+    FragmentPaintMetrics {
+        slot_top,
+        slot_height: CHIP_BOX_HEIGHT,
+    }
 }
 
 fn chip_palette(tone: ChipTone) -> (Color32, Color32, Color32) {
     match tone {
         ChipTone::Mention => (
-            Color32::from_rgb(234, 242, 255),
-            Color32::from_rgb(191, 210, 242),
-            Color32::from_rgb(44, 90, 168),
+            Color32::from_rgba_premultiplied(21, 90, 136, 31),
+            Color32::from_rgba_premultiplied(21, 90, 136, 31),
+            Color32::from_rgb(21, 90, 136),
         ),
         ChipTone::Status => (
-            Color32::from_rgb(234, 246, 232),
-            Color32::from_rgb(187, 220, 181),
-            Color32::from_rgb(53, 109, 63),
+            Color32::from_rgba_premultiplied(196, 129, 20, 31),
+            Color32::from_rgba_premultiplied(196, 129, 20, 36),
+            Color32::from_rgb(145, 98, 7),
         ),
         ChipTone::Priority => (
-            Color32::from_rgb(253, 236, 228),
-            Color32::from_rgb(239, 190, 167),
-            Color32::from_rgb(170, 74, 41),
+            Color32::from_rgba_premultiplied(176, 44, 44, 26),
+            Color32::from_rgba_premultiplied(176, 44, 44, 36),
+            Color32::from_rgb(142, 35, 35),
         ),
         ChipTone::Time => (
-            Color32::from_rgb(243, 238, 255),
-            Color32::from_rgb(206, 193, 242),
-            Color32::from_rgb(92, 70, 160),
+            Color32::from_rgba_premultiplied(70, 118, 77, 28),
+            Color32::from_rgba_premultiplied(70, 118, 77, 36),
+            Color32::from_rgb(53, 95, 56),
         ),
         ChipTone::Count => (
-            Color32::from_rgb(241, 240, 234),
-            Color32::from_rgb(212, 208, 191),
-            Color32::from_rgb(88, 80, 64),
+            Color32::from_rgba_premultiplied(67, 57, 122, 26),
+            Color32::from_rgba_premultiplied(67, 57, 122, 33),
+            Color32::from_rgb(72, 62, 131),
         ),
     }
+}
+
+fn paint_fragment_runs(
+    painter: &egui::Painter,
+    x: f32,
+    fragment: &LineFragment,
+    metrics: FragmentPaintMetrics,
+    style: &pretext::TextStyleSpec,
+    color: Color32,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+) {
+    if fragment.visual_runs.is_empty() {
+        let fallback_run = LayoutLineVisualRun {
+            text: fragment.text.clone(),
+            width: fragment.text_width,
+            start: LINE_START_CURSOR,
+            end: LINE_START_CURSOR,
+            level: 0,
+            direction: pretext::BidiDirection::Ltr,
+        };
+        paint_run_with_fallbacks(
+            painter,
+            x,
+            &fallback_run,
+            style,
+            color,
+            metrics,
+            ctx,
+            engine,
+            assets,
+        );
+        return;
+    }
+
+    let mut offset = 0.0f32;
+    for run in &fragment.visual_runs {
+        if run.text.is_empty() {
+            continue;
+        }
+
+        let run_left = x + offset;
+        paint_run_with_fallbacks(
+            painter, run_left, run, style, color, metrics, ctx, engine, assets,
+        );
+        offset += run.width;
+    }
+}
+
+fn paint_run_with_fallbacks(
+    painter: &egui::Painter,
+    run_left: f32,
+    run: &LayoutLineVisualRun,
+    style: &pretext::TextStyleSpec,
+    color: Color32,
+    metrics: FragmentPaintMetrics,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+) {
+    if !contains_supported_emoji(&run.text) {
+        paint_shaped_text_fragment(
+            painter,
+            run_left,
+            run,
+            0.0,
+            run.width,
+            &run.text,
+            style,
+            color,
+            metrics,
+            ctx,
+            engine,
+            assets,
+            BaselineMode::AutoFontMetrics,
+        );
+        return;
+    }
+
+    let baseline_metrics = rich_run_baseline_metrics(run, style, metrics, color, engine);
+    let baseline_mode = BaselineMode::FixedBaselinePx(baseline_metrics.baseline_px);
+    let graphemes = run.text.grapheme_indices(true).collect::<Vec<_>>();
+    let prefix_widths = engine.prefix_widths(&run.text, style);
+    let mut fragment_start = 0usize;
+
+    for (index, (byte_start, grapheme)) in graphemes.iter().enumerate() {
+        let Some(emoji_id) = AssetRegistry::builtin_emoji_for_grapheme(grapheme) else {
+            continue;
+        };
+
+        if fragment_start < index {
+            let text_start = graphemes[fragment_start].0;
+            let text = &run.text[text_start..*byte_start];
+            let fragment_offset = prefix_widths[fragment_start];
+            let fragment_width = fragment_width(&prefix_widths, fragment_start, index);
+            paint_shaped_text_fragment(
+                painter,
+                run_left,
+                run,
+                fragment_offset,
+                fragment_width,
+                text,
+                style,
+                color,
+                metrics,
+                ctx,
+                engine,
+                assets,
+                baseline_mode,
+            );
+        }
+
+        let emoji_start = prefix_widths[index];
+        let emoji_end = prefix_widths[index + 1];
+        paint_emoji_fragment(
+            painter,
+            run_left,
+            run,
+            emoji_start,
+            emoji_end,
+            emoji_id,
+            style.size_px,
+            metrics,
+            ctx,
+            assets,
+            baseline_metrics,
+        );
+
+        fragment_start = index + 1;
+    }
+
+    if fragment_start < graphemes.len() {
+        let text_start = graphemes[fragment_start].0;
+        let text = &run.text[text_start..];
+        let fragment_offset = prefix_widths[fragment_start];
+        let trailing_width = prefix_widths.last().copied().unwrap_or(run.width) - fragment_offset;
+        paint_shaped_text_fragment(
+            painter,
+            run_left,
+            run,
+            fragment_offset,
+            trailing_width,
+            text,
+            style,
+            color,
+            metrics,
+            ctx,
+            engine,
+            assets,
+            baseline_mode,
+        );
+    }
+}
+
+fn fragment_width(prefix_widths: &[f32], start: usize, end: usize) -> f32 {
+    prefix_widths
+        .get(end)
+        .copied()
+        .unwrap_or_else(|| prefix_widths.last().copied().unwrap_or(0.0))
+        - prefix_widths.get(start).copied().unwrap_or(0.0)
+}
+
+fn paint_shaped_text_fragment(
+    painter: &egui::Painter,
+    run_left: f32,
+    run: &LayoutLineVisualRun,
+    fragment_offset: f32,
+    fragment_width: f32,
+    text: &str,
+    style: &pretext::TextStyleSpec,
+    color: Color32,
+    metrics: FragmentPaintMetrics,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+    baseline_mode: BaselineMode,
+) {
+    let request = rich_shaped_text_request(
+        text,
+        style,
+        run.direction,
+        color,
+        fragment_width,
+        metrics,
+        baseline_mode,
+    );
+    let Some(texture) = assets.shaped_text_texture(engine, request, ctx) else {
+        return;
+    };
+    let slot_left = fragment_slot_left(run_left, run, fragment_offset, fragment_width);
+    let pixels_per_point = ctx.pixels_per_point().max(1.0);
+    let rect_min = egui::pos2(
+        ((slot_left - SHAPED_TEXT_PAD_X) * pixels_per_point).round() / pixels_per_point,
+        ((metrics.slot_top - SHAPED_TEXT_PAD_Y) * pixels_per_point).round() / pixels_per_point,
+    );
+    let rect = Rect::from_min_size(rect_min, texture.logical_size);
+    painter.image(
+        texture.handle.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        color,
+    );
+}
+
+fn rich_shaped_text_request<'a>(
+    text: &'a str,
+    style: &'a pretext::TextStyleSpec,
+    direction: pretext::BidiDirection,
+    color: Color32,
+    fragment_width: f32,
+    metrics: FragmentPaintMetrics,
+    baseline_mode: BaselineMode,
+) -> ShapedTextRasterRequest<'a> {
+    ShapedTextRasterRequest {
+        text,
+        style,
+        direction,
+        color,
+        fragment_width,
+        slot_height: metrics.slot_height,
+        padding_x: SHAPED_TEXT_PAD_X,
+        padding_y: SHAPED_TEXT_PAD_Y,
+        slack_x: 2.0,
+        slack_y: 4.0,
+        baseline_mode,
+        texture_options: egui::TextureOptions::NEAREST,
+    }
+}
+
+fn fragment_slot_left(
+    run_left: f32,
+    run: &LayoutLineVisualRun,
+    fragment_offset: f32,
+    fragment_width: f32,
+) -> f32 {
+    match run.direction {
+        pretext::BidiDirection::Ltr => run_left + fragment_offset,
+        pretext::BidiDirection::Rtl => run_left + run.width - fragment_offset - fragment_width,
+    }
+}
+
+fn paint_emoji_fragment(
+    painter: &egui::Painter,
+    run_left: f32,
+    run: &LayoutLineVisualRun,
+    fragment_start: f32,
+    fragment_end: f32,
+    emoji_id: EmojiAssetId,
+    emoji_size: f32,
+    metrics: FragmentPaintMetrics,
+    ctx: &egui::Context,
+    assets: &mut AssetRegistry,
+    baseline_metrics: BaselineMetrics,
+) {
+    let slot_left = fragment_slot_left(
+        run_left,
+        run,
+        fragment_start,
+        (fragment_end - fragment_start).max(1.0),
+    );
+    let slot_width = (fragment_end - fragment_start).max(1.0);
+    let size = emoji_size.min(metrics.slot_height).min(slot_width).max(1.0);
+    let rect = Rect::from_min_size(
+        egui::pos2(
+            slot_left + (slot_width - size).max(0.0) * 0.5,
+            metrics.slot_top + baseline_metrics.square_top(size),
+        ),
+        egui::vec2(size, size),
+    );
+    let texture = assets.emoji_texture(emoji_id, [96, 96], ctx);
+    painter.image(
+        texture.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+fn rich_run_baseline_metrics(
+    run: &LayoutLineVisualRun,
+    style: &pretext::TextStyleSpec,
+    metrics: FragmentPaintMetrics,
+    color: Color32,
+    engine: &PretextEngine,
+) -> BaselineMetrics {
+    shaped_text_baseline_metrics(
+        engine,
+        rich_shaped_text_request(
+            &run.text,
+            style,
+            run.direction,
+            color,
+            run.width,
+            metrics,
+            BaselineMode::AutoFontMetrics,
+        ),
+    )
+}
+
+fn contains_supported_emoji(text: &str) -> bool {
+    text.graphemes(true)
+        .any(|grapheme| AssetRegistry::builtin_emoji_for_grapheme(grapheme).is_some())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{RawInput, TextureId};
+
+    fn bundled_engine() -> PretextEngine {
+        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+    }
+
+    fn shape_uses_user_texture(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().any(shape_uses_user_texture),
+            _ => shape.texture_id() != TextureId::default(),
+        }
+    }
 
     #[test]
     fn chips_stay_atomic_across_lines() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = bundled_engine();
         let items = prepare_inline_items(&engine, INLINE_SPECS);
         let lines = layout_inline_items(&engine, &items, 310.0);
 
@@ -817,10 +1435,7 @@ mod tests {
 
     #[test]
     fn rich_note_layout_is_deterministic() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = bundled_engine();
         let items = prepare_inline_items(&engine, INLINE_SPECS);
         let first = layout_inline_items(&engine, &items, 420.0);
         let second = layout_inline_items(&engine, &items, 420.0);
@@ -828,11 +1443,17 @@ mod tests {
     }
 
     #[test]
-    fn rich_note_keeps_visual_runs_for_mixed_direction_text() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
+    fn note_shell_width_tracks_body_width() {
+        assert_eq!(
+            note_shell_width(BODY_DEFAULT_WIDTH),
+            BODY_DEFAULT_WIDTH + NOTE_SHELL_PADDING as f32 * 2.0
         );
+        assert!(note_shell_width(640.0) > note_shell_width(420.0));
+    }
+
+    #[test]
+    fn rich_note_keeps_visual_runs_for_mixed_direction_text() {
+        let engine = bundled_engine();
         let items = prepare_inline_items(&engine, INLINE_SPECS);
         let mixed = items
             .iter()
@@ -856,10 +1477,7 @@ mod tests {
 
     #[test]
     fn chips_use_engine_atomic_placeholders() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = bundled_engine();
         let items = prepare_inline_items(&engine, INLINE_SPECS);
 
         let chip = items
@@ -884,5 +1502,93 @@ mod tests {
                 grapheme_index: 0,
             }
         );
+    }
+
+    #[test]
+    fn rich_note_render_emits_texture_shapes_for_mixed_emoji_and_arabic() {
+        let ctx = egui::Context::default();
+        let engine = bundled_engine();
+        let mut assets = AssetRegistry::default();
+        assets.install_fonts(&ctx);
+
+        let mut demo = RichNoteDemo {
+            open: true,
+            requested_width: BODY_DEFAULT_WIDTH,
+            items: None,
+            layout_cache: None,
+        };
+
+        let raw_input = |time: f64| RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 960.0),
+            )),
+            time: Some(time),
+            ..Default::default()
+        };
+
+        let _ = ctx.run(raw_input(0.0), |ctx| {
+            demo.show(ctx, &engine, &mut assets);
+        });
+        let output = ctx.run(raw_input(1.0), |ctx| {
+            demo.show(ctx, &engine, &mut assets);
+        });
+
+        assert!(output
+            .shapes
+            .iter()
+            .any(|clipped| { shape_uses_user_texture(&clipped.shape) }));
+    }
+
+    #[test]
+    fn rich_note_arabic_textures_materialize_for_body_and_chip_slots() {
+        let ctx = egui::Context::default();
+        let engine = bundled_engine();
+        let mut assets = AssetRegistry::default();
+
+        let body_request = rich_shaped_text_request(
+            "عربي",
+            text_style_model(TextStyleName::Body).spec,
+            pretext::BidiDirection::Rtl,
+            INK,
+            36.0,
+            FragmentPaintMetrics {
+                slot_top: 0.0,
+                slot_height: BODY_TEXT_SIZE,
+            },
+            BaselineMode::AutoFontMetrics,
+        );
+        let chip_request = rich_shaped_text_request(
+            "جاهز",
+            chip_text_style(),
+            pretext::BidiDirection::Rtl,
+            chip_palette(ChipTone::Status).2,
+            24.0,
+            FragmentPaintMetrics {
+                slot_top: 0.0,
+                slot_height: CHIP_BOX_HEIGHT,
+            },
+            BaselineMode::AutoFontMetrics,
+        );
+
+        let body = assets
+            .shaped_text_texture(&engine, body_request, &ctx)
+            .expect("body arabic texture should exist");
+        let body_cached = assets
+            .shaped_text_texture(&engine, body_request, &ctx)
+            .expect("cached body arabic texture should exist");
+        let chip = assets
+            .shaped_text_texture(&engine, chip_request, &ctx)
+            .expect("chip arabic texture should exist");
+        let stats = assets.stats_snapshot();
+
+        assert_eq!(body.handle.id(), body_cached.handle.id());
+        assert_eq!(body.logical_size, body_cached.logical_size);
+        assert!(body.logical_size.x > 0.0);
+        assert!(chip.logical_size.x > 0.0);
+        assert_eq!(stats.texture_uploads, 2);
+        assert_eq!(stats.texture_cache_hits, 1);
+        assert_eq!(stats.texture_cache_misses, 2);
+        assert_eq!(stats.render.rasterizations, 2);
     }
 }

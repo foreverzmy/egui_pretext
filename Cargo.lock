@@ -2849,15 +2849,41 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
- "image",
- "parking_lot",
  "pretext",
+ "pretext-egui",
+ "pretext-render",
  "resvg",
  "serde",
  "serde_json",
  "tiny-skia 0.12.0",
- "ttf-parser",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "pretext-egui"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "egui",
+ "image",
+ "lru",
+ "pretext",
+ "pretext-render",
+ "resvg",
+ "tiny-skia 0.12.0",
+ "ttf-parser",
+]
+
+[[package]]
+name = "pretext-render"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "lru",
+ "parking_lot",
+ "pretext",
+ "tiny-skia 0.12.0",
+ "ttf-parser",
 ]
 
 [[package]]

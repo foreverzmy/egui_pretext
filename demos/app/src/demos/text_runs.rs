@@ -1,38 +1,72 @@
 use eframe::egui;
-use egui::{Align2, Color32, FontId};
-use pretext::{BidiDirection, LayoutLineVisualRun};
+use egui::{Align2, Color32, FontFamily, FontId};
+use pretext::{LayoutLineGlyphRun, TextStyleSpec};
+use pretext_egui::AssetRegistry;
 
-pub(crate) fn paint_visual_runs(
+pub(crate) fn paint_glyph_runs(
     painter: &egui::Painter,
     x: f32,
     y: f32,
     fallback_text: &str,
-    runs: &[LayoutLineVisualRun],
-    font: &FontId,
+    glyph_runs: &[LayoutLineGlyphRun],
+    style: &TextStyleSpec,
+    line_height: f32,
     color: Color32,
+    ctx: &egui::Context,
+    engine: &pretext::PretextEngine,
+    assets: &mut AssetRegistry,
 ) {
-    if runs.is_empty() {
-        painter.text(
-            egui::pos2(x, y),
-            Align2::LEFT_TOP,
-            fallback_text,
-            font.clone(),
-            color,
-        );
+    paint_glyph_runs_with_fallback(
+        painter,
+        x,
+        y,
+        fallback_text,
+        glyph_runs,
+        style,
+        line_height,
+        color,
+        ctx,
+        engine,
+        assets,
+    );
+}
+
+pub(crate) fn paint_glyph_runs_with_fallback(
+    painter: &egui::Painter,
+    x: f32,
+    y: f32,
+    fallback_text: &str,
+    glyph_runs: &[LayoutLineGlyphRun],
+    style: &TextStyleSpec,
+    line_height: f32,
+    color: Color32,
+    ctx: &egui::Context,
+    engine: &pretext::PretextEngine,
+    assets: &mut AssetRegistry,
+) {
+    if assets.paint_line_glyph_runs(
+        painter,
+        x,
+        y,
+        glyph_runs,
+        style,
+        line_height,
+        color,
+        ctx,
+        engine,
+    ) {
         return;
     }
 
-    let mut offset = 0.0f32;
-    for run in runs {
-        if run.text.is_empty() {
-            continue;
-        }
-
-        let (anchor, pos_x) = match run.direction {
-            BidiDirection::Ltr => (Align2::LEFT_TOP, x + offset),
-            BidiDirection::Rtl => (Align2::RIGHT_TOP, x + offset + run.width),
-        };
-        painter.text(egui::pos2(pos_x, y), anchor, &run.text, font.clone(), color);
-        offset += run.width;
+    if fallback_text.is_empty() {
+        return;
     }
+
+    painter.text(
+        egui::pos2(x, y),
+        Align2::LEFT_TOP,
+        fallback_text,
+        FontId::new(style.size_px, FontFamily::Proportional),
+        color,
+    );
 }

@@ -1,21 +1,30 @@
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 
 use crate::analysis::{GraphemeKind, WhiteSpaceMode};
 use crate::bidi::{BidiDirection, BidiRun, ParagraphDirection};
-use crate::font_catalog::FontCatalog;
+use crate::font_catalog::{FontCatalog, FontId, LoadedFace};
 use crate::layout::{self, ParagraphCache};
 use crate::line_break::BreakOpportunity;
 use crate::measure::{self, ShapeCache, ShapedGlyph};
+
+const PREPARED_TEXT_CACHE_CAPACITY: usize = 256;
+const ATOMIC_PLACEHOLDER_CACHE_CAPACITY: usize = 128;
 
 pub struct PretextEngine {
     font_catalog: FontCatalog,
     shape_cache: Mutex<ShapeCache>,
     para_cache: Option<ParagraphCache>,
+    prepare_cache: PrepareCache,
     locale: RwLock<Option<String>>,
+    revision: u64,
+    runtime_stats: RuntimeStats,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +83,26 @@ pub struct LayoutLineVisualRun {
     pub direction: BidiDirection,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutGlyph {
+    pub face_id: FontId,
+    pub glyph_id: u16,
+    pub x: f32,
+    pub advance: f32,
+    pub x_offset: f32,
+    pub y_offset: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutLineGlyphRun {
+    pub width: f32,
+    pub start: LayoutCursor,
+    pub end: LayoutCursor,
+    pub level: u8,
+    pub direction: BidiDirection,
+    pub glyphs: Vec<LayoutGlyph>,
+}
+
 #[derive(Clone)]
 pub struct ShapedTextSpan {
     pub text: String,
@@ -104,6 +133,26 @@ pub struct LayoutWithLinesResult {
     pub lines: Vec<LayoutLine>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineRuntimeStats {
+    pub prepare_calls: u64,
+    pub prepare_with_segments_calls: u64,
+    pub prepare_atomic_placeholder_calls: u64,
+    pub prepare_cache_hits: u64,
+    pub prepare_cache_misses: u64,
+    pub atomic_placeholder_cache_hits: u64,
+    pub atomic_placeholder_cache_misses: u64,
+    pub layout_calls: u64,
+    pub layout_with_lines_calls: u64,
+    pub walk_line_ranges_calls: u64,
+    pub layout_next_line_calls: u64,
+    pub line_visual_runs_calls: u64,
+    pub line_glyph_runs_calls: u64,
+    pub glyph_advance_calls: u64,
+    pub prefix_widths_calls: u64,
+    pub shape_text_spans_calls: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum SegmentKind {
     Text,
@@ -129,6 +178,7 @@ pub(crate) struct PreparedCore {
     pub segments: Arc<[Segment]>,
     pub seg_meta: Arc<[SegmentMeta]>,
     pub bidi_runs: Arc<[BidiRun]>,
+    pub hyphen_glyphs: Arc<[ShapedGlyph]>,
     pub hash: u64,
     pub style_hash: u64,
     pub locale_hash: u64,
@@ -161,12 +211,63 @@ pub(crate) struct GraphemeMeta {
     pub break_after: BreakOpportunity,
 }
 
+#[derive(Default)]
+struct RuntimeStats {
+    prepare_calls: AtomicU64,
+    prepare_with_segments_calls: AtomicU64,
+    prepare_atomic_placeholder_calls: AtomicU64,
+    prepare_cache_hits: AtomicU64,
+    prepare_cache_misses: AtomicU64,
+    atomic_placeholder_cache_hits: AtomicU64,
+    atomic_placeholder_cache_misses: AtomicU64,
+    layout_calls: AtomicU64,
+    layout_with_lines_calls: AtomicU64,
+    walk_line_ranges_calls: AtomicU64,
+    layout_next_line_calls: AtomicU64,
+    line_visual_runs_calls: AtomicU64,
+    line_glyph_runs_calls: AtomicU64,
+    glyph_advance_calls: AtomicU64,
+    prefix_widths_calls: AtomicU64,
+    shape_text_spans_calls: AtomicU64,
+}
+
+struct PrepareCache {
+    text: Mutex<LruCache<PrepareCacheKey, PreparedTextWithSegments>>,
+    atomic_placeholders: Mutex<LruCache<AtomicPlaceholderCacheKey, PreparedTextWithSegments>>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PrepareCacheKey {
+    text: String,
+    style: TextStyleCacheKey,
+    locale: Option<String>,
+    white_space: WhiteSpaceMode,
+    paragraph_direction: ParagraphDirection,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct TextStyleCacheKey {
+    families: Vec<String>,
+    size_px_bits: u32,
+    weight: u16,
+    italic: bool,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct AtomicPlaceholderCacheKey {
+    width_bits: u32,
+    locale: Option<String>,
+    white_space: WhiteSpaceMode,
+    paragraph_direction: ParagraphDirection,
+}
+
 impl PreparedText {
     pub(crate) fn new(
         text: Arc<str>,
         segments: Arc<[Segment]>,
         seg_meta: Arc<[SegmentMeta]>,
         bidi_runs: Arc<[BidiRun]>,
+        hyphen_glyphs: Arc<[ShapedGlyph]>,
         hash: u64,
         style_hash: u64,
         locale_hash: u64,
@@ -179,6 +280,7 @@ impl PreparedText {
                 segments,
                 seg_meta,
                 bidi_runs,
+                hyphen_glyphs,
                 hash,
                 style_hash,
                 locale_hash,
@@ -220,11 +322,119 @@ impl PreparedText {
     pub(crate) fn locale_hash(&self) -> u64 {
         self.core.locale_hash
     }
+
+    pub(crate) fn hyphen_glyphs(&self) -> &[ShapedGlyph] {
+        &self.core.hyphen_glyphs
+    }
 }
 
 impl PreparedTextWithSegments {
     pub(crate) fn inner(&self) -> &PreparedText {
         &self.inner
+    }
+
+    pub fn as_prepared(&self) -> &PreparedText {
+        &self.inner
+    }
+}
+
+impl PrepareCache {
+    fn new() -> Self {
+        Self {
+            text: Mutex::new(LruCache::new(
+                NonZeroUsize::new(PREPARED_TEXT_CACHE_CAPACITY)
+                    .expect("prepared text cache capacity"),
+            )),
+            atomic_placeholders: Mutex::new(LruCache::new(
+                NonZeroUsize::new(ATOMIC_PLACEHOLDER_CACHE_CAPACITY)
+                    .expect("atomic placeholder cache capacity"),
+            )),
+        }
+    }
+
+    fn clear(&self) {
+        self.text.lock().clear();
+        self.atomic_placeholders.lock().clear();
+    }
+
+    fn get_or_compute_text(
+        &self,
+        key: PrepareCacheKey,
+        compute: impl FnOnce() -> PreparedTextWithSegments,
+    ) -> (PreparedTextWithSegments, bool) {
+        if let Some(cached) = self.text.lock().get(&key).cloned() {
+            return (cached, true);
+        }
+
+        let value = compute();
+        let mut cache = self.text.lock();
+        if let Some(cached) = cache.get(&key).cloned() {
+            return (cached, true);
+        }
+        cache.put(key, value.clone());
+        (value, false)
+    }
+
+    fn get_or_compute_atomic_placeholder(
+        &self,
+        key: AtomicPlaceholderCacheKey,
+        compute: impl FnOnce() -> PreparedTextWithSegments,
+    ) -> (PreparedTextWithSegments, bool) {
+        if let Some(cached) = self.atomic_placeholders.lock().get(&key).cloned() {
+            return (cached, true);
+        }
+
+        let value = compute();
+        let mut cache = self.atomic_placeholders.lock();
+        if let Some(cached) = cache.get(&key).cloned() {
+            return (cached, true);
+        }
+        cache.put(key, value.clone());
+        (value, false)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.text.lock().len() + self.atomic_placeholders.lock().len()
+    }
+}
+
+impl PrepareCacheKey {
+    fn new(
+        text: &str,
+        style: &TextStyleSpec,
+        opts: &PrepareOptions,
+        locale: Option<String>,
+    ) -> Self {
+        Self {
+            text: text.to_owned(),
+            style: TextStyleCacheKey::new(style),
+            locale,
+            white_space: opts.white_space,
+            paragraph_direction: opts.paragraph_direction,
+        }
+    }
+}
+
+impl TextStyleCacheKey {
+    fn new(style: &TextStyleSpec) -> Self {
+        Self {
+            families: style.families.clone(),
+            size_px_bits: style.size_px.to_bits(),
+            weight: style.weight,
+            italic: style.italic,
+        }
+    }
+}
+
+impl AtomicPlaceholderCacheKey {
+    fn new(width: f32, opts: &PrepareOptions, locale: Option<String>) -> Self {
+        Self {
+            width_bits: width.max(0.0).to_bits(),
+            locale,
+            white_space: opts.white_space,
+            paragraph_direction: opts.paragraph_direction,
+        }
     }
 }
 
@@ -234,7 +444,10 @@ impl PretextEngine {
             font_catalog: FontCatalog::new(),
             shape_cache: Mutex::new(ShapeCache::new()),
             para_cache: Some(ParagraphCache::new()),
+            prepare_cache: PrepareCache::new(),
             locale: RwLock::new(None),
+            revision: next_engine_revision(),
+            runtime_stats: RuntimeStats::default(),
         }
     }
 
@@ -256,7 +469,10 @@ impl PretextEngine {
             ),
             shape_cache: Mutex::new(ShapeCache::new()),
             para_cache: Some(ParagraphCache::new()),
+            prepare_cache: PrepareCache::new(),
             locale: RwLock::new(None),
+            revision: next_engine_revision(),
+            runtime_stats: RuntimeStats::default(),
         }
     }
 
@@ -266,17 +482,10 @@ impl PretextEngine {
         style: &TextStyleSpec,
         opts: &PrepareOptions,
     ) -> PreparedText {
-        let locale = self.locale();
-        layout::prepare_text(
-            text,
-            style,
-            opts,
-            &self.font_catalog,
-            &self.shape_cache,
-            hash_locale(locale.clone()),
-            locale.as_deref(),
-        )
-        .inner
+        self.runtime_stats
+            .prepare_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.prepare_cached(text, style, opts).inner
     }
 
     pub fn prepare_with_segments(
@@ -285,16 +494,10 @@ impl PretextEngine {
         style: &TextStyleSpec,
         opts: &PrepareOptions,
     ) -> PreparedTextWithSegments {
-        let locale = self.locale();
-        layout::prepare_text(
-            text,
-            style,
-            opts,
-            &self.font_catalog,
-            &self.shape_cache,
-            hash_locale(locale.clone()),
-            locale.as_deref(),
-        )
+        self.runtime_stats
+            .prepare_with_segments_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.prepare_cached(text, style, opts)
     }
 
     pub fn prepare_atomic_placeholder(
@@ -302,7 +505,10 @@ impl PretextEngine {
         width: f32,
         opts: &PrepareOptions,
     ) -> PreparedTextWithSegments {
-        layout::prepare_atomic_placeholder(width, opts, hash_locale(self.locale()))
+        self.runtime_stats
+            .prepare_atomic_placeholder_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.prepare_atomic_placeholder_cached(width, opts)
     }
 
     pub fn layout(
@@ -311,6 +517,9 @@ impl PretextEngine {
         max_width: f32,
         line_height: f32,
     ) -> LayoutResult {
+        self.runtime_stats
+            .layout_calls
+            .fetch_add(1, Ordering::Relaxed);
         layout::layout(prepared, max_width, line_height, self.para_cache.as_ref())
     }
 
@@ -320,6 +529,9 @@ impl PretextEngine {
         max_width: f32,
         line_height: f32,
     ) -> LayoutWithLinesResult {
+        self.runtime_stats
+            .layout_with_lines_calls
+            .fetch_add(1, Ordering::Relaxed);
         layout::layout_with_lines(prepared, max_width, line_height, self.para_cache.as_ref())
     }
 
@@ -329,6 +541,9 @@ impl PretextEngine {
         max_width: f32,
         on_line: impl FnMut(&LayoutLineRange),
     ) -> f32 {
+        self.runtime_stats
+            .walk_line_ranges_calls
+            .fetch_add(1, Ordering::Relaxed);
         layout::walk_line_ranges(prepared, max_width, on_line, self.para_cache.as_ref())
     }
 
@@ -338,6 +553,9 @@ impl PretextEngine {
         start: &mut LayoutCursor,
         max_width: f32,
     ) -> Option<LayoutLine> {
+        self.runtime_stats
+            .layout_next_line_calls
+            .fetch_add(1, Ordering::Relaxed);
         layout::layout_next_line(prepared, start, max_width, self.para_cache.as_ref())
     }
 
@@ -346,13 +564,28 @@ impl PretextEngine {
         prepared: &PreparedTextWithSegments,
         line: &LayoutLine,
     ) -> Vec<LayoutLineVisualRun> {
+        self.runtime_stats
+            .line_visual_runs_calls
+            .fetch_add(1, Ordering::Relaxed);
         layout::line_visual_runs(prepared.inner(), line)
+    }
+
+    pub fn line_glyph_runs(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        line: &LayoutLine,
+    ) -> Vec<LayoutLineGlyphRun> {
+        self.runtime_stats
+            .line_glyph_runs_calls
+            .fetch_add(1, Ordering::Relaxed);
+        layout::line_glyph_runs(prepared.inner(), line)
     }
 
     pub fn clear_cache(&mut self) {
         self.shape_cache.get_mut().clear();
         crate::analysis::clear_runtime_caches();
         self.font_catalog.clear_runtime_caches();
+        self.prepare_cache.clear();
         if let Some(cache) = &self.para_cache {
             cache.clear();
         }
@@ -368,9 +601,13 @@ impl PretextEngine {
             *current = next;
         }
         self.clear_cache();
+        self.revision = next_engine_revision();
     }
 
     pub fn glyph_advance(&self, ch: char, style: &TextStyleSpec) -> f32 {
+        self.runtime_stats
+            .glyph_advance_calls
+            .fetch_add(1, Ordering::Relaxed);
         measure::measure_cluster_width(
             &ch.to_string(),
             style,
@@ -380,16 +617,22 @@ impl PretextEngine {
     }
 
     pub fn prefix_widths(&self, text: &str, style: &TextStyleSpec) -> Arc<[f32]> {
+        self.runtime_stats
+            .prefix_widths_calls
+            .fetch_add(1, Ordering::Relaxed);
         measure::prefix_widths(text, style, &self.font_catalog, &self.shape_cache)
     }
 
-    pub fn shape_text_spans(
+    pub fn shape_text_spans_shared(
         &self,
         text: &str,
         style: &TextStyleSpec,
         direction: BidiDirection,
-    ) -> Vec<ShapedTextSpan> {
-        measure::shape_text_spans(
+    ) -> Arc<[ShapedTextSpan]> {
+        self.runtime_stats
+            .shape_text_spans_calls
+            .fetch_add(1, Ordering::Relaxed);
+        measure::shape_text_spans_shared(
             text,
             direction,
             style,
@@ -398,18 +641,120 @@ impl PretextEngine {
         )
     }
 
+    pub fn shape_text_spans(
+        &self,
+        text: &str,
+        style: &TextStyleSpec,
+        direction: BidiDirection,
+    ) -> Vec<ShapedTextSpan> {
+        self.shape_text_spans_shared(text, style, direction)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn locale(&self) -> Option<String> {
         self.locale.read().clone()
     }
 
+    pub fn load_face(&self, id: FontId) -> Option<Arc<LoadedFace>> {
+        self.font_catalog.load_face(id)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn has_paragraph_cache(&self) -> bool {
         self.para_cache.is_some()
+    }
+
+    pub fn runtime_stats(&self) -> EngineRuntimeStats {
+        self.runtime_stats.snapshot()
+    }
+
+    fn prepare_cached(
+        &self,
+        text: &str,
+        style: &TextStyleSpec,
+        opts: &PrepareOptions,
+    ) -> PreparedTextWithSegments {
+        let locale = self.locale();
+        let key = PrepareCacheKey::new(text, style, opts, locale.clone());
+        let (prepared, hit) = self.prepare_cache.get_or_compute_text(key, || {
+            layout::prepare_text(
+                text,
+                style,
+                opts,
+                &self.font_catalog,
+                &self.shape_cache,
+                hash_locale(locale.clone()),
+                locale.as_deref(),
+            )
+        });
+        let counter = if hit {
+            &self.runtime_stats.prepare_cache_hits
+        } else {
+            &self.runtime_stats.prepare_cache_misses
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        prepared
+    }
+
+    fn prepare_atomic_placeholder_cached(
+        &self,
+        width: f32,
+        opts: &PrepareOptions,
+    ) -> PreparedTextWithSegments {
+        let locale = self.locale();
+        let key = AtomicPlaceholderCacheKey::new(width, opts, locale.clone());
+        let (prepared, hit) = self
+            .prepare_cache
+            .get_or_compute_atomic_placeholder(key, || {
+                layout::prepare_atomic_placeholder(width, opts, hash_locale(locale.clone()))
+            });
+        let counter = if hit {
+            &self.runtime_stats.atomic_placeholder_cache_hits
+        } else {
+            &self.runtime_stats.atomic_placeholder_cache_misses
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        prepared
     }
 }
 
 impl Default for PretextEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl RuntimeStats {
+    fn snapshot(&self) -> EngineRuntimeStats {
+        EngineRuntimeStats {
+            prepare_calls: self.prepare_calls.load(Ordering::Relaxed),
+            prepare_with_segments_calls: self.prepare_with_segments_calls.load(Ordering::Relaxed),
+            prepare_atomic_placeholder_calls: self
+                .prepare_atomic_placeholder_calls
+                .load(Ordering::Relaxed),
+            prepare_cache_hits: self.prepare_cache_hits.load(Ordering::Relaxed),
+            prepare_cache_misses: self.prepare_cache_misses.load(Ordering::Relaxed),
+            atomic_placeholder_cache_hits: self
+                .atomic_placeholder_cache_hits
+                .load(Ordering::Relaxed),
+            atomic_placeholder_cache_misses: self
+                .atomic_placeholder_cache_misses
+                .load(Ordering::Relaxed),
+            layout_calls: self.layout_calls.load(Ordering::Relaxed),
+            layout_with_lines_calls: self.layout_with_lines_calls.load(Ordering::Relaxed),
+            walk_line_ranges_calls: self.walk_line_ranges_calls.load(Ordering::Relaxed),
+            layout_next_line_calls: self.layout_next_line_calls.load(Ordering::Relaxed),
+            line_visual_runs_calls: self.line_visual_runs_calls.load(Ordering::Relaxed),
+            line_glyph_runs_calls: self.line_glyph_runs_calls.load(Ordering::Relaxed),
+            glyph_advance_calls: self.glyph_advance_calls.load(Ordering::Relaxed),
+            prefix_widths_calls: self.prefix_widths_calls.load(Ordering::Relaxed),
+            shape_text_spans_calls: self.shape_text_spans_calls.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -422,6 +767,11 @@ fn hash_locale(locale: Option<String>) -> u64 {
         None => 0u8.hash(&mut state),
     }
     state.finish()
+}
+
+fn next_engine_revision() -> u64 {
+    static NEXT_ENGINE_REVISION: AtomicU64 = AtomicU64::new(1);
+    NEXT_ENGINE_REVISION.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -471,6 +821,7 @@ mod tests {
         let layout = engine.layout_with_lines(&prepared, 120.0, 24.0);
         assert!(layout.line_count > 0);
         assert!(engine.shape_cache.lock().len() > 0);
+        assert_eq!(engine.prepare_cache.len(), 1);
         assert_eq!(
             engine
                 .para_cache
@@ -483,6 +834,7 @@ mod tests {
         engine.set_locale(Some("en"));
 
         assert_eq!(engine.shape_cache.lock().len(), 0);
+        assert_eq!(engine.prepare_cache.len(), 0);
         assert_eq!(
             engine
                 .para_cache
@@ -619,6 +971,113 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(after_first, after_second);
+    }
+
+    #[test]
+    fn prepare_with_segments_reuses_cached_prepared_core() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let opts = PrepareOptions::default();
+
+        let first = engine.prepare_with_segments("cache me", &style, &opts);
+        let second = engine.prepare_with_segments("cache me", &style, &opts);
+
+        assert!(Arc::ptr_eq(&first.inner.core, &second.inner.core));
+        assert!(Arc::ptr_eq(&first.seg_meta, &second.seg_meta));
+        assert_eq!(engine.prepare_cache.len(), 1);
+
+        let stats = engine.runtime_stats();
+        assert_eq!(stats.prepare_cache_hits, 1);
+        assert_eq!(stats.prepare_cache_misses, 1);
+    }
+
+    #[test]
+    fn prepare_and_prepare_with_segments_share_cached_prepared_core() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let opts = PrepareOptions::default();
+
+        let first = engine.prepare("shared cache", &style, &opts);
+        let second = engine.prepare_with_segments("shared cache", &style, &opts);
+
+        assert!(Arc::ptr_eq(&first.core, &second.inner.core));
+        assert_eq!(engine.prepare_cache.len(), 1);
+
+        let stats = engine.runtime_stats();
+        assert_eq!(stats.prepare_cache_hits, 1);
+        assert_eq!(stats.prepare_cache_misses, 1);
+    }
+
+    #[test]
+    fn atomic_placeholder_reuses_cached_prepared_core() {
+        let engine = bundled_engine();
+        let opts = PrepareOptions::default();
+
+        let first = engine.prepare_atomic_placeholder(72.0, &opts);
+        let second = engine.prepare_atomic_placeholder(72.0, &opts);
+
+        assert!(Arc::ptr_eq(&first.inner.core, &second.inner.core));
+        assert!(Arc::ptr_eq(&first.seg_meta, &second.seg_meta));
+        assert_eq!(engine.prepare_cache.len(), 1);
+
+        let stats = engine.runtime_stats();
+        assert_eq!(stats.atomic_placeholder_cache_hits, 1);
+        assert_eq!(stats.atomic_placeholder_cache_misses, 1);
+    }
+
+    #[test]
+    fn engine_revision_tracks_semantic_engine_changes() {
+        let first = bundled_engine();
+        let second = bundled_engine();
+        assert_ne!(first.revision(), second.revision());
+
+        let mut engine = bundled_engine();
+        let initial = engine.revision();
+        engine.clear_cache();
+        assert_eq!(engine.revision(), initial);
+
+        engine.set_locale(Some("th"));
+        let thai = engine.revision();
+        assert_ne!(thai, initial);
+
+        engine.set_locale(Some("th"));
+        assert_eq!(engine.revision(), thai);
+
+        engine.set_locale(None);
+        assert_ne!(engine.revision(), thai);
+    }
+
+    #[test]
+    fn shape_text_spans_shared_reuses_cached_arc() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+
+        let first = engine.shape_text_spans_shared("بدأت الرحلة", &style, BidiDirection::Rtl);
+        let after_first = engine.shape_cache.lock().len();
+        let second = engine.shape_text_spans_shared("بدأت الرحلة", &style, BidiDirection::Rtl);
+        let after_second = engine.shape_cache.lock().len();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(after_first, after_second);
+    }
+
+    #[test]
+    fn shape_text_spans_matches_shared_contents() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let shared =
+            engine.shape_text_spans_shared("English العربية mixed", &style, BidiDirection::Ltr);
+        let owned = engine.shape_text_spans("English العربية mixed", &style, BidiDirection::Ltr);
+
+        assert_eq!(shared.len(), owned.len());
+        for (shared_span, owned_span) in shared.iter().zip(owned.iter()) {
+            assert_eq!(shared_span.text, owned_span.text);
+            assert_eq!(shared_span.byte_range, owned_span.byte_range);
+            assert_eq!(shared_span.width, owned_span.width);
+            assert_eq!(shared_span.direction, owned_span.direction);
+            assert_eq!(shared_span.face.id(), owned_span.face.id());
+            assert_eq!(shared_span.glyphs.len(), owned_span.glyphs.len());
+        }
     }
 
     #[test]

@@ -15,9 +15,11 @@ use crate::font_catalog::{FontCatalog, FontId, LoadedFace};
 
 const SHAPE_CACHE_CAPACITY: usize = 2048;
 const PREFIX_WIDTHS_CACHE_CAPACITY: usize = 512;
+const SHAPED_SPANS_CACHE_CAPACITY: usize = 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShapedGlyph {
+    pub face_id: FontId,
     pub glyph_id: u16,
     pub cluster_byte: usize,
     pub advance: f32,
@@ -42,9 +44,17 @@ struct PrefixWidthsCacheKey {
     style_hash: u64,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ShapedSpansCacheKey {
+    text_hash: u64,
+    style_hash: u64,
+    direction: BidiDirection,
+}
+
 pub struct ShapeCache {
     inner: LruCache<ShapeCacheKey, Arc<[ShapedGlyph]>>,
     prefix_widths: LruCache<PrefixWidthsCacheKey, Arc<[f32]>>,
+    shaped_spans: LruCache<ShapedSpansCacheKey, Arc<[ShapedTextSpan]>>,
 }
 
 impl ShapeCache {
@@ -52,17 +62,19 @@ impl ShapeCache {
         Self {
             inner: LruCache::new(NonZeroUsize::new(SHAPE_CACHE_CAPACITY).unwrap()),
             prefix_widths: LruCache::new(NonZeroUsize::new(PREFIX_WIDTHS_CACHE_CAPACITY).unwrap()),
+            shaped_spans: LruCache::new(NonZeroUsize::new(SHAPED_SPANS_CACHE_CAPACITY).unwrap()),
         }
     }
 
     pub fn clear(&mut self) {
         self.inner.clear();
         self.prefix_widths.clear();
+        self.shaped_spans.clear();
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.len() + self.prefix_widths.len()
+        self.inner.len() + self.prefix_widths.len() + self.shaped_spans.len()
     }
 }
 
@@ -116,15 +128,24 @@ pub(crate) fn measure_text(
     }
 }
 
-pub(crate) fn shape_text_spans(
+pub(crate) fn shape_text_spans_shared(
     text: &str,
     direction: BidiDirection,
     style: &TextStyleSpec,
     catalog: &FontCatalog,
     cache: &Mutex<ShapeCache>,
-) -> Vec<ShapedTextSpan> {
+) -> Arc<[ShapedTextSpan]> {
     if text.is_empty() {
-        return Vec::new();
+        return Arc::from(Vec::<ShapedTextSpan>::new());
+    }
+
+    let key = ShapedSpansCacheKey {
+        text_hash: hash_text(text),
+        style_hash: hash_style(style),
+        direction,
+    };
+    if let Some(cached) = cache.lock().shaped_spans.get(&key).cloned() {
+        return cached;
     }
 
     let graphemes: Vec<AnalyzedGrapheme> = UnicodeSegmentation::grapheme_indices(text, true)
@@ -177,6 +198,8 @@ pub(crate) fn shape_text_spans(
         });
     }
 
+    let output: Arc<[ShapedTextSpan]> = Arc::from(output);
+    cache.lock().shaped_spans.put(key, output.clone());
     output
 }
 
@@ -298,6 +321,7 @@ pub fn shape_run(
         .iter()
         .zip(glyph_buffer.glyph_positions())
         .map(|(info, pos)| ShapedGlyph {
+            face_id: face.id(),
             glyph_id: info.glyph_id as u16,
             cluster_byte: info.cluster as usize,
             advance: pos.x_advance as f32 * scale,

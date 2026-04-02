@@ -9,7 +9,8 @@ pub mod measure;
 pub use crate::analysis::WhiteSpaceMode;
 pub use crate::bidi::{BidiDirection, ParagraphDirection};
 pub use crate::engine::{
-    LayoutCursor, LayoutLine, LayoutLineRange, LayoutLineVisualRun, LayoutResult,
-    LayoutWithLinesResult, PrepareOptions, PreparedText, PreparedTextWithSegments, PretextEngine,
-    SegmentKind, ShapedTextSpan, TextStyleSpec,
+    EngineRuntimeStats, LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineGlyphRun,
+    LayoutLineRange, LayoutLineVisualRun, LayoutResult, LayoutWithLinesResult, PrepareOptions,
+    PreparedText, PreparedTextWithSegments, PretextEngine, SegmentKind, ShapedTextSpan,
+    TextStyleSpec,
 };

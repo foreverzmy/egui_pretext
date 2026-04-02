@@ -7,12 +7,14 @@ use pretext::{
     BidiDirection, LayoutLine, LayoutLineVisualRun, ParagraphDirection, PrepareOptions,
     PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
 };
+use pretext_egui::{
+    shaped_text_baseline_metrics, AssetRegistry, BaselineMetrics, BaselineMode, EmojiAssetId,
+    ShapedTextRasterRequest,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::assets::AssetRegistry;
 use crate::demos::DemoWindow;
 
-const PAGE_MAX_WIDTH: f32 = 1080.0;
 const DESKTOP_PAGE_MARGIN: f32 = 32.0;
 const MOBILE_PAGE_MARGIN: f32 = 20.0;
 const GRID_GAP: f32 = 16.0;
@@ -24,6 +26,8 @@ const CHAT_PADDING: i8 = 16;
 const CHAT_GAP: f32 = 8.0;
 const BUBBLE_MAX_RATIO: f32 = 0.8;
 const MIN_CHAT_WIDTH: f32 = 220.0;
+const MAX_CHAT_WIDTH: f32 = 1500.0;
+const PAGE_MAX_WIDTH: f32 = 1600.0;
 const DEFAULT_CHAT_WIDTH: f32 = 340.0;
 const LINE_HEIGHT: f32 = 20.0;
 const TEXT_SIZE: f32 = 15.0;
@@ -101,10 +105,16 @@ struct BubbleRenderState {
     tight_bubbles: Vec<BubbleVisual>,
 }
 
+struct BubbleRenderCache {
+    chat_width_q: u32,
+    render_state: BubbleRenderState,
+}
+
 pub struct BubblesDemo {
     open: bool,
     requested_chat_width: f32,
     prepared_bubbles: Option<Vec<PreparedBubble>>,
+    render_cache: Option<BubbleRenderCache>,
 }
 
 impl Default for BubblesDemo {
@@ -113,6 +123,7 @@ impl Default for BubblesDemo {
             open: false,
             requested_chat_width: DEFAULT_CHAT_WIDTH,
             prepared_bubbles: None,
+            render_cache: None,
         }
     }
 }
@@ -139,6 +150,34 @@ impl BubblesDemo {
             .expect("prepared bubbles should exist")
     }
 
+    fn ensure_render_state(
+        &mut self,
+        engine: &PretextEngine,
+        chat_width: f32,
+    ) -> &BubbleRenderState {
+        let chat_width_q = quantize_width(chat_width);
+        let should_rebuild = self
+            .render_cache
+            .as_ref()
+            .map(|cache| cache.chat_width_q != chat_width_q)
+            .unwrap_or(true);
+
+        if should_rebuild {
+            let render_state =
+                compute_bubble_render(self.ensure_prepared_bubbles(engine), engine, chat_width);
+            self.render_cache = Some(BubbleRenderCache {
+                chat_width_q,
+                render_state,
+            });
+        }
+
+        &self
+            .render_cache
+            .as_ref()
+            .expect("bubble render cache should exist")
+            .render_state
+    }
+
     fn show_window(
         &mut self,
         ctx: &egui::Context,
@@ -147,7 +186,7 @@ impl BubblesDemo {
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
-            .default_size(egui::vec2(1160.0, 900.0))
+            .default_size(egui::vec2(1600.0, 900.0))
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
@@ -173,9 +212,6 @@ impl BubblesDemo {
         self.requested_chat_width = self
             .requested_chat_width
             .clamp(MIN_CHAT_WIDTH, max_chat_width.max(MIN_CHAT_WIDTH));
-        let requested_chat_width = self.requested_chat_width;
-        let prepared = self.ensure_prepared_bubbles(engine);
-        let render_state = compute_bubble_render(prepared, engine, requested_chat_width);
 
         ui.scope_builder(
             UiBuilder::new().layout(Layout::top_down(Align::Center)),
@@ -198,7 +234,9 @@ impl BubblesDemo {
                                 ui.add_space(24.0);
                                 paint_controls(ui, &mut self.requested_chat_width, max_chat_width);
                                 ui.add_space(16.0);
-                                paint_panels(ui, ctx, engine, assets, &render_state, page_width);
+                                let render_state =
+                                    self.ensure_render_state(engine, self.requested_chat_width);
+                                paint_panels(ui, ctx, engine, assets, render_state, page_width);
                                 ui.add_space(16.0);
                                 paint_why_section(ui);
                             },
@@ -222,6 +260,7 @@ impl DemoWindow for BubblesDemo {
         self.open = open;
         if !open {
             self.prepared_bubbles = None;
+            self.render_cache = None;
         }
     }
 
@@ -293,15 +332,14 @@ fn page_width_for_viewport(viewport_width: f32) -> f32 {
     (viewport_width - gutter).min(PAGE_MAX_WIDTH).max(280.0)
 }
 
+fn quantize_width(width: f32) -> u32 {
+    (width.max(1.0) * 4.0).round() as u32
+}
+
 fn get_max_chat_width(min_width: f32, viewport_width: f32) -> f32 {
     let page_width = page_width_for_viewport(viewport_width);
-    let column_width = if viewport_width <= 760.0 {
-        page_width
-    } else {
-        (page_width - GRID_GAP) * 0.5
-    };
-    let panel_content_width = (column_width - PANEL_PADDING_X).max(1.0);
-    min_width.max(panel_content_width.floor())
+    let panel_content_width = (page_width - PANEL_PADDING_X).max(1.0);
+    panel_content_width.floor().clamp(min_width, MAX_CHAT_WIDTH)
 }
 
 fn collect_wrap_metrics(
@@ -336,9 +374,7 @@ fn find_tight_wrap_metrics(
 
     while lo < hi {
         let mid = (lo + hi) / 2;
-        let mid_line_count = engine
-            .layout_with_lines(prepared, mid as f32, LINE_HEIGHT)
-            .line_count;
+        let mid_line_count = count_lines_for_width(engine, prepared, mid as f32);
         if mid_line_count <= initial.line_count {
             hi = mid;
         } else {
@@ -351,6 +387,18 @@ fn find_tight_wrap_metrics(
         wrap_width,
         metrics: collect_wrap_metrics(engine, prepared, wrap_width),
     }
+}
+
+fn count_lines_for_width(
+    engine: &PretextEngine,
+    prepared: &PreparedTextWithSegments,
+    width: f32,
+) -> usize {
+    let mut line_count = 0usize;
+    engine.walk_line_ranges(prepared, width.max(1.0), |_| {
+        line_count += 1;
+    });
+    line_count
 }
 
 fn compute_bubble_render(
@@ -393,12 +441,16 @@ fn build_bubble_visual(
         .iter()
         .map(|line| engine.line_visual_runs(&bubble.prepared, line))
         .collect::<Vec<_>>();
-    let metrics = collect_wrap_metrics(engine, &bubble.prepared, wrap_width);
+    let max_line_width = layout
+        .lines
+        .iter()
+        .fold(0.0f32, |acc, line| acc.max(line.width));
+    let height = layout.line_count as f32 * LINE_HEIGHT;
 
     BubbleVisual {
         side: bubble.side,
-        bubble_width: metrics.max_line_width.ceil() + BUBBLE_PADDING_H * 2.0,
-        bubble_height: metrics.height + BUBBLE_PADDING_V * 2.0,
+        bubble_width: max_line_width.ceil() + BUBBLE_PADDING_H * 2.0,
+        bubble_height: height + BUBBLE_PADDING_V * 2.0,
         lines: layout.lines,
         visual_runs,
     }
@@ -459,6 +511,11 @@ fn paint_controls(ui: &mut egui::Ui, requested_chat_width: &mut f32, max_chat_wi
         .inner_margin(egui::Margin::symmetric(18, 16))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let value_width = 64.0;
+            let value_label = RichText::new(format!("{:.0}px", requested_chat_width.round()))
+                .monospace()
+                .size(12.0)
+                .color(INK);
             let compact = ui.available_width() <= 560.0;
             if compact {
                 ui.vertical(|ui| {
@@ -469,17 +526,19 @@ fn paint_controls(ui: &mut egui::Ui, requested_chat_width: &mut f32, max_chat_wi
                             .color(MUTED),
                     );
                     ui.add_space(8.0);
-                    ui.add(
-                        egui::Slider::new(requested_chat_width, MIN_CHAT_WIDTH..=max_chat_width)
+                    let slider_width = ui.available_width().max(1.0);
+                    ui.scope(|ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(
+                            egui::Slider::new(
+                                requested_chat_width,
+                                MIN_CHAT_WIDTH..=max_chat_width,
+                            )
                             .show_value(false),
-                    );
+                        );
+                    });
                     ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(format!("{:.0}px", requested_chat_width.round()))
-                            .monospace()
-                            .size(12.0)
-                            .color(INK),
-                    );
+                    ui.label(value_label);
                 });
             } else {
                 ui.horizontal(|ui| {
@@ -489,18 +548,19 @@ fn paint_controls(ui: &mut egui::Ui, requested_chat_width: &mut f32, max_chat_wi
                             .size(12.0)
                             .color(MUTED),
                     );
-                    ui.add_space(8.0);
-                    ui.add_sized(
-                        egui::vec2(ui.available_width() - 88.0, 20.0),
-                        egui::Slider::new(requested_chat_width, MIN_CHAT_WIDTH..=max_chat_width)
+                    let slider_width =
+                        (ui.available_width() - value_width - ui.spacing().item_spacing.x).max(1.0);
+                    ui.scope(|ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(
+                            egui::Slider::new(
+                                requested_chat_width,
+                                MIN_CHAT_WIDTH..=max_chat_width,
+                            )
                             .show_value(false),
-                    );
-                    ui.label(
-                        RichText::new(format!("{:.0}px", requested_chat_width.round()))
-                            .monospace()
-                            .size(12.0)
-                            .color(INK),
-                    );
+                        );
+                    });
+                    ui.add_sized(egui::vec2(value_width, 20.0), egui::Label::new(value_label));
                 });
             }
         });
@@ -514,7 +574,8 @@ fn paint_panels(
     render_state: &BubbleRenderState,
     page_width: f32,
 ) {
-    let single_column = page_width <= 760.0;
+    let single_column =
+        page_width <= 760.0 || !can_fit_two_bubble_panels(page_width, render_state.chat_width);
     let old_spacing = ui.spacing().item_spacing;
     ui.spacing_mut().item_spacing = egui::vec2(GRID_GAP, GRID_GAP);
 
@@ -569,6 +630,11 @@ fn paint_panels(
     }
 
     ui.spacing_mut().item_spacing = old_spacing;
+}
+
+fn can_fit_two_bubble_panels(page_width: f32, chat_width: f32) -> bool {
+    let column_width = (page_width - GRID_GAP) * 0.5;
+    (column_width - PANEL_PADDING_X).max(1.0) >= chat_width
 }
 
 fn paint_bubbles_panel(
@@ -757,177 +823,43 @@ fn paint_shaped_text_run(
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
-    let logical_size = shaped_text_logical_size(run.width);
-    let raster_scale = ctx.pixels_per_point().max(1.0);
-    let texture_size = shaped_text_texture_size(logical_size, raster_scale);
-    let key = shaped_text_texture_key(&run.text, run.direction, texture_size);
-    let texture = assets
-        .get_or_load_generated_image(
-            &key,
-            texture_size,
-            egui::TextureOptions::NEAREST,
-            ctx,
-            || rasterize_shaped_text_run(run, engine, raster_scale, texture_size),
-        )
-        .clone();
-    let rect_min = snap_pos_to_pixels(
-        egui::pos2(run_left - SHAPED_TEXT_PAD_X, y - SHAPED_TEXT_PAD_Y),
-        raster_scale,
-    );
-    let rect = Rect::from_min_size(rect_min, logical_size);
-    painter.image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
+    paint_shaped_text_fragment(
+        painter,
+        run_left,
+        y,
+        run,
+        0.0,
+        run.width,
+        &run.text,
+        CHAT_TEXT,
+        ctx,
+        engine,
+        assets,
+        BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
     );
 }
 
-fn shaped_text_logical_size(text_width: f32) -> egui::Vec2 {
-    egui::vec2(
-        text_width.ceil().max(1.0) + SHAPED_TEXT_PAD_X * 2.0 + 2.0,
-        LINE_HEIGHT.ceil() + SHAPED_TEXT_PAD_Y * 2.0 + 2.0,
-    )
-}
-
-fn shaped_text_texture_size(logical_size: egui::Vec2, raster_scale: f32) -> [usize; 2] {
-    [
-        (logical_size.x * raster_scale).ceil().max(1.0) as usize,
-        (logical_size.y * raster_scale).ceil().max(1.0) as usize,
-    ]
-}
-
-fn shaped_text_texture_key(text: &str, direction: BidiDirection, size: [usize; 2]) -> String {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    direction.hash(&mut hasher);
-    size.hash(&mut hasher);
-    format!("bubbles/shaped-text/{:016x}", hasher.finish())
-}
-
-fn snap_pos_to_pixels(pos: egui::Pos2, pixels_per_point: f32) -> egui::Pos2 {
-    egui::pos2(
-        (pos.x * pixels_per_point).round() / pixels_per_point,
-        (pos.y * pixels_per_point).round() / pixels_per_point,
-    )
-}
-
-fn rasterize_shaped_text_run(
-    run: &LayoutLineVisualRun,
-    engine: &PretextEngine,
-    raster_scale: f32,
-    size: [usize; 2],
-) -> Option<egui::ColorImage> {
-    let mut pixmap = tiny_skia::Pixmap::new(size[0] as u32, size[1] as u32)?;
-    let spans = engine.shape_text_spans(&run.text, &bubble_text_style(), run.direction);
-    let mut paint = tiny_skia::Paint::default();
-    paint.set_color_rgba8(255, 255, 255, 255);
-    paint.anti_alias = true;
-
-    let mut span_left = SHAPED_TEXT_PAD_X * raster_scale;
-    let baseline = (SHAPED_TEXT_BASELINE + SHAPED_TEXT_PAD_Y) * raster_scale;
-
-    for span in spans {
-        rasterize_shaped_text_span(
-            &mut pixmap,
-            &paint,
-            &span,
-            span_left,
-            baseline,
-            raster_scale,
-        );
-        span_left += span.width * raster_scale;
-    }
-
-    let pixels = pixmap
-        .pixels()
-        .iter()
-        .map(|pixel| {
-            egui::Color32::from_rgba_premultiplied(
-                pixel.red(),
-                pixel.green(),
-                pixel.blue(),
-                pixel.alpha(),
-            )
-        })
-        .collect();
-    Some(egui::ColorImage::new(size, pixels))
-}
-
-fn rasterize_shaped_text_span(
-    pixmap: &mut tiny_skia::Pixmap,
-    paint: &tiny_skia::Paint<'_>,
-    span: &pretext::ShapedTextSpan,
-    span_left: f32,
-    baseline: f32,
-    raster_scale: f32,
-) {
-    let Ok(face) = ttf_parser::Face::parse(span.face.data(), span.face.face_index()) else {
-        return;
-    };
-    let units_per_em = span.face.units_per_em().max(1) as f32;
-    let glyph_scale = TEXT_SIZE * raster_scale / units_per_em;
-    // `shape_text_spans` already returns spans/glyphs in visual order.
-    let mut pen_x = span_left;
-
-    for glyph in span.glyphs.iter() {
-        let advance = glyph.advance * raster_scale;
-        let glyph_x = pen_x + glyph.x_offset * raster_scale;
-        pen_x += advance;
-
-        let Some(path) = glyph_path(&face, glyph.glyph_id) else {
-            continue;
-        };
-        let transform = tiny_skia::Transform::from_row(
-            glyph_scale,
-            0.0,
-            0.0,
-            -glyph_scale,
-            glyph_x,
-            baseline - glyph.y_offset * raster_scale,
-        );
-        pixmap.fill_path(&path, paint, tiny_skia::FillRule::Winding, transform, None);
-    }
-}
-
-fn glyph_path(face: &ttf_parser::Face<'_>, glyph_id: u16) -> Option<tiny_skia::Path> {
-    let mut builder = GlyphPathBuilder::default();
-    face.outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)?;
-    builder.finish()
-}
-
-#[derive(Default)]
-struct GlyphPathBuilder {
-    inner: tiny_skia::PathBuilder,
-}
-
-impl GlyphPathBuilder {
-    fn finish(self) -> Option<tiny_skia::Path> {
-        self.inner.finish()
-    }
-}
-
-impl ttf_parser::OutlineBuilder for GlyphPathBuilder {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.inner.move_to(x, y);
-    }
-
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.inner.line_to(x, y);
-    }
-
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.inner.quad_to(x1, y1, x, y);
-    }
-
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.inner.cubic_to(x1, y1, x2, y2, x, y);
-    }
-
-    fn close(&mut self) {
-        self.inner.close();
+fn bubble_shaped_text_request<'a>(
+    text: &'a str,
+    style: &'a pretext::TextStyleSpec,
+    direction: BidiDirection,
+    color: Color32,
+    fragment_width: f32,
+    baseline_mode: BaselineMode,
+) -> ShapedTextRasterRequest<'a> {
+    ShapedTextRasterRequest {
+        text,
+        style,
+        direction,
+        color,
+        fragment_width,
+        slot_height: LINE_HEIGHT,
+        padding_x: SHAPED_TEXT_PAD_X,
+        padding_y: SHAPED_TEXT_PAD_Y,
+        slack_x: 2.0,
+        slack_y: 2.0,
+        baseline_mode,
+        texture_options: egui::TextureOptions::NEAREST,
     }
 }
 
@@ -948,27 +880,35 @@ fn paint_run_with_svg_emoji_fallback(
         return;
     }
 
+    let baseline_metrics = bubble_run_baseline_metrics(run, color, engine);
+    let baseline_mode = BaselineMode::FixedBaselinePx(baseline_metrics.baseline_px);
     let graphemes = run.text.grapheme_indices(true).collect::<Vec<_>>();
     let prefix_widths = engine.prefix_widths(&run.text, &bubble_text_style());
     let mut fragment_start = 0usize;
 
     for (index, (byte_start, grapheme)) in graphemes.iter().enumerate() {
-        let Some((emoji_key, emoji_svg)) = emoji_svg_for_grapheme(grapheme) else {
+        let Some(emoji_id) = AssetRegistry::builtin_emoji_for_grapheme(grapheme) else {
             continue;
         };
 
         if fragment_start < index {
             let text_start = graphemes[fragment_start].0;
             let text = &run.text[text_start..*byte_start];
-            paint_text_fragment(
+            let fragment_offset = prefix_widths[fragment_start];
+            let fragment_width = prefix_widths[index] - fragment_offset;
+            paint_shaped_text_fragment(
                 painter,
                 run_left,
                 y,
                 run,
-                prefix_widths[fragment_start],
+                fragment_offset,
+                fragment_width,
                 text,
-                font,
                 color,
+                ctx,
+                engine,
+                assets,
+                baseline_mode,
             );
         }
 
@@ -981,11 +921,11 @@ fn paint_run_with_svg_emoji_fallback(
             run,
             emoji_start,
             emoji_end,
-            emoji_key,
-            emoji_svg,
+            emoji_id,
             ctx,
             assets,
             line_height,
+            baseline_metrics,
         );
 
         fragment_start = index + 1;
@@ -994,17 +934,68 @@ fn paint_run_with_svg_emoji_fallback(
     if fragment_start < graphemes.len() {
         let text_start = graphemes[fragment_start].0;
         let text = &run.text[text_start..];
-        paint_text_fragment(
+        let fragment_offset = prefix_widths[fragment_start];
+        let fragment_width = prefix_widths.last().copied().unwrap_or(run.width) - fragment_offset;
+        paint_shaped_text_fragment(
             painter,
             run_left,
             y,
             run,
-            prefix_widths[fragment_start],
+            fragment_offset,
+            fragment_width,
             text,
-            font,
             color,
+            ctx,
+            engine,
+            assets,
+            baseline_mode,
         );
     }
+}
+
+fn paint_shaped_text_fragment(
+    painter: &egui::Painter,
+    run_left: f32,
+    y: f32,
+    run: &LayoutLineVisualRun,
+    fragment_offset: f32,
+    fragment_width: f32,
+    text: &str,
+    color: Color32,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+    baseline_mode: BaselineMode,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let style = bubble_text_style();
+    let request = bubble_shaped_text_request(
+        text,
+        &style,
+        run.direction,
+        color,
+        fragment_width,
+        baseline_mode,
+    );
+    let Some(texture) = assets.shaped_text_texture(engine, request, ctx) else {
+        return;
+    };
+    let slot_left = fragment_slot_left(run_left, run, fragment_offset, fragment_width);
+    let pixels_per_point = ctx.pixels_per_point().max(1.0);
+    let rect_min = egui::pos2(
+        ((slot_left - SHAPED_TEXT_PAD_X) * pixels_per_point).round() / pixels_per_point,
+        ((y - SHAPED_TEXT_PAD_Y) * pixels_per_point).round() / pixels_per_point,
+    );
+    let rect = Rect::from_min_size(rect_min, texture.logical_size);
+    painter.image(
+        texture.handle.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        color,
+    );
 }
 
 fn paint_text_fragment(
@@ -1035,28 +1026,28 @@ fn paint_emoji_fragment(
     run: &LayoutLineVisualRun,
     fragment_start: f32,
     fragment_end: f32,
-    texture_key: &str,
-    svg_bytes: &[u8],
+    emoji_id: EmojiAssetId,
     ctx: &egui::Context,
     assets: &mut AssetRegistry,
     line_height: f32,
+    baseline_metrics: BaselineMetrics,
 ) {
-    let slot_left = match run.direction {
-        BidiDirection::Ltr => run_left + fragment_start,
-        BidiDirection::Rtl => run_left + run.width - fragment_end,
-    };
+    let slot_left = fragment_slot_left(
+        run_left,
+        run,
+        fragment_start,
+        (fragment_end - fragment_start).max(1.0),
+    );
     let slot_width = (fragment_end - fragment_start).max(1.0);
     let size = EMOJI_SIZE.min(line_height - 2.0).min(slot_width).max(1.0);
     let rect = Rect::from_min_size(
         egui::pos2(
             slot_left + (slot_width - size).max(0.0) * 0.5,
-            y + (line_height - size) * 0.5,
+            y + baseline_metrics.square_top(size),
         ),
         egui::vec2(size, size),
     );
-    let texture = assets
-        .get_or_load_svg(texture_key, svg_bytes, [96, 96], ctx)
-        .clone();
+    let texture = assets.emoji_texture(emoji_id, [96, 96], ctx);
     painter.image(
         texture.id(),
         rect,
@@ -1065,8 +1056,40 @@ fn paint_emoji_fragment(
     );
 }
 
+fn fragment_slot_left(
+    run_left: f32,
+    run: &LayoutLineVisualRun,
+    fragment_offset: f32,
+    fragment_width: f32,
+) -> f32 {
+    match run.direction {
+        BidiDirection::Ltr => run_left + fragment_offset,
+        BidiDirection::Rtl => run_left + run.width - fragment_offset - fragment_width,
+    }
+}
+
+fn bubble_run_baseline_metrics(
+    run: &LayoutLineVisualRun,
+    color: Color32,
+    engine: &PretextEngine,
+) -> BaselineMetrics {
+    let style = bubble_text_style();
+    shaped_text_baseline_metrics(
+        engine,
+        bubble_shaped_text_request(
+            &run.text,
+            &style,
+            run.direction,
+            color,
+            run.width,
+            BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
+        ),
+    )
+}
+
 fn contains_supported_emoji(text: &str) -> bool {
-    text.contains('🎉')
+    text.graphemes(true)
+        .any(|grapheme| AssetRegistry::builtin_emoji_for_grapheme(grapheme).is_some())
 }
 
 fn contains_arabic_shaping(text: &str) -> bool {
@@ -1080,16 +1103,6 @@ fn contains_arabic_shaping(text: &str) -> bool {
                 | 0xFE70..=0xFEFF
         )
     })
-}
-
-fn emoji_svg_for_grapheme(grapheme: &str) -> Option<(&'static str, &'static [u8])> {
-    match grapheme {
-        "🎉" => Some((
-            "bubbles/emoji/party-popper",
-            AssetRegistry::party_popper_emoji_svg(),
-        )),
-        _ => None,
-    }
 }
 
 fn paint_why_section(ui: &mut egui::Ui) {
@@ -1186,6 +1199,18 @@ mod tests {
     }
 
     #[test]
+    fn max_chat_width_supports_1500px_when_viewport_allows() {
+        let viewport_width = PAGE_MAX_WIDTH + DESKTOP_PAGE_MARGIN;
+
+        assert_eq!(page_width_for_viewport(viewport_width), PAGE_MAX_WIDTH);
+        assert_eq!(
+            get_max_chat_width(MIN_CHAT_WIDTH, viewport_width),
+            MAX_CHAT_WIDTH
+        );
+        assert!(!can_fit_two_bubble_panels(PAGE_MAX_WIDTH, MAX_CHAT_WIDTH));
+    }
+
+    #[test]
     fn party_popper_message_emits_svg_emoji_shape() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
@@ -1195,6 +1220,7 @@ mod tests {
             open: true,
             requested_chat_width: DEFAULT_CHAT_WIDTH,
             prepared_bubbles: None,
+            render_cache: None,
         };
 
         let raw_input = || RawInput {
@@ -1244,8 +1270,10 @@ mod tests {
     }
 
     #[test]
-    fn mixed_bidi_shaped_text_bbox_tracks_pretext_run_width() {
+    fn mixed_bidi_shaped_text_texture_reuses_cached_handle() {
+        let ctx = egui::Context::default();
         let engine = bundled_engine();
+        let mut assets = AssetRegistry::default();
         let prepared = bubble_messages()
             .iter()
             .map(|message| PreparedBubble {
@@ -1259,31 +1287,29 @@ mod tests {
             .collect::<Vec<_>>();
         let render = compute_bubble_render(&prepared, &engine, DEFAULT_CHAT_WIDTH);
         let run = render.tight_bubbles[5].visual_runs[0][0].clone();
-        let raster_scale = 2.0;
-        let size = shaped_text_texture_size(shaped_text_logical_size(run.width), raster_scale);
-        let image =
-            rasterize_shaped_text_run(&run, &engine, raster_scale, size).expect("image exists");
-
-        let mut min_x = size[0];
-        let mut max_x = 0usize;
-        for y in 0..image.size[1] {
-            for x in 0..image.size[0] {
-                if image.pixels[y * image.size[0] + x].a() > 0 {
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                }
-            }
-        }
-
-        assert!(min_x <= max_x);
-        assert!(
-            min_x as f32 >= SHAPED_TEXT_PAD_X * raster_scale - 1.0,
-            "ink started too far left: min_x={min_x}"
+        let style = bubble_text_style();
+        let request = bubble_shaped_text_request(
+            &run.text,
+            &style,
+            run.direction,
+            CHAT_TEXT,
+            run.width,
+            BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
         );
-        assert!(
-            max_x as f32 <= (SHAPED_TEXT_PAD_X + run.width) * raster_scale + 2.0,
-            "ink overflowed run slot: max_x={max_x} run_width={}",
-            run.width
-        );
+        let first = assets
+            .shaped_text_texture(&engine, request, &ctx)
+            .expect("texture exists");
+        let second = assets
+            .shaped_text_texture(&engine, request, &ctx)
+            .expect("cached texture exists");
+        let stats = assets.stats_snapshot();
+
+        assert_eq!(first.handle.id(), second.handle.id());
+        assert_eq!(first.logical_size, second.logical_size);
+        assert!(first.logical_size.x >= run.width + SHAPED_TEXT_PAD_X * 2.0);
+        assert_eq!(stats.texture_uploads, 1);
+        assert_eq!(stats.texture_cache_hits, 1);
+        assert_eq!(stats.texture_cache_misses, 1);
+        assert_eq!(stats.render.rasterizations, 1);
     }
 }

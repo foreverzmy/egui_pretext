@@ -8,9 +8,9 @@ use unicode_bidi::{BidiInfo, Level};
 use crate::analysis::{analyze_text, slice_text, GraphemeKind, WhiteSpaceMode};
 use crate::bidi::paragraph_to_bidi_runs;
 use crate::engine::{
-    GraphemeMeta, LayoutCursor, LayoutLine, LayoutLineRange, LayoutLineVisualRun, LayoutResult,
-    LayoutWithLinesResult, PrepareOptions, PreparedText, PreparedTextWithSegments, Segment,
-    SegmentKind, SegmentMeta, TextStyleSpec,
+    GraphemeMeta, LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineGlyphRun, LayoutLineRange,
+    LayoutLineVisualRun, LayoutResult, LayoutWithLinesResult, PrepareOptions, PreparedText,
+    PreparedTextWithSegments, Segment, SegmentKind, SegmentMeta, TextStyleSpec,
 };
 use crate::font_catalog::FontCatalog;
 use crate::line_break::compute_breaks;
@@ -158,6 +158,7 @@ pub(crate) fn prepare_text(
         segments,
         seg_meta.clone(),
         Arc::from(bidi_runs),
+        hyphen_glyphs(style, font_catalog, shape_cache),
         hash,
         style_hash,
         locale_hash,
@@ -199,6 +200,7 @@ pub(crate) fn prepare_atomic_placeholder(
         segments,
         seg_meta.clone(),
         Arc::from(Vec::new()),
+        Arc::from(Vec::<ShapedGlyph>::new()),
         hash_atomic_placeholder(safe_width),
         0,
         locale_hash,
@@ -394,6 +396,31 @@ pub(crate) fn line_visual_runs(
         .collect()
 }
 
+pub(crate) fn line_glyph_runs(
+    prepared: &PreparedText,
+    line: &LayoutLine,
+) -> Vec<LayoutLineGlyphRun> {
+    let visual_runs = line_visual_runs(prepared, line);
+    let mut run_left = 0.0f32;
+    let mut output = Vec::with_capacity(visual_runs.len());
+
+    for run in visual_runs {
+        let mut glyphs = collect_run_glyphs(prepared, &run, line.text.ends_with('-'));
+        shift_glyphs_x(&mut glyphs, run_left);
+        output.push(LayoutLineGlyphRun {
+            width: run.width,
+            start: run.start,
+            end: run.end,
+            level: run.level,
+            direction: run.direction,
+            glyphs,
+        });
+        run_left += run.width;
+    }
+
+    output
+}
+
 fn next_line_range_internal(
     prepared: &PreparedText,
     start: &mut LayoutCursor,
@@ -496,6 +523,122 @@ fn segment_glyphs(glyphs: &[ShapedGlyph], byte_range: &Range<usize>) -> Arc<[Sha
             })
             .collect::<Vec<_>>(),
     )
+}
+
+fn hyphen_glyphs(
+    style: &TextStyleSpec,
+    font_catalog: &FontCatalog,
+    shape_cache: &Mutex<ShapeCache>,
+) -> Arc<[ShapedGlyph]> {
+    let preferred = font_catalog.resolve_style_chain(style);
+    let Some(face) = font_catalog.face_for_cluster("-", &preferred) else {
+        return Arc::from(Vec::<ShapedGlyph>::new());
+    };
+    let mut cache = shape_cache.lock();
+    crate::measure::shape_run(
+        "-",
+        &face,
+        unicode_script::Script::Latin,
+        crate::bidi::BidiDirection::Ltr,
+        style,
+        &mut cache,
+    )
+}
+
+fn collect_run_glyphs(
+    prepared: &PreparedText,
+    run: &LayoutLineVisualRun,
+    line_has_hyphen: bool,
+) -> Vec<LayoutGlyph> {
+    let start_byte = cursor_byte_pos(prepared, run.start);
+    let end_byte = cursor_byte_pos(prepared, run.end);
+    let mut glyphs = Vec::new();
+    let mut pen_x = 0.0f32;
+    let segment_range = if run.direction == crate::bidi::BidiDirection::Rtl {
+        EitherSegmentIter::Reverse(run.start.segment_index..=run.end.segment_index)
+    } else {
+        EitherSegmentIter::Forward(run.start.segment_index..=run.end.segment_index)
+    };
+
+    for segment_index in segment_range {
+        let Some(segment) = prepared.core.segments.get(segment_index) else {
+            continue;
+        };
+        let slice_start = start_byte.max(segment.byte_range.start);
+        let slice_end = end_byte.min(segment.byte_range.end);
+        if slice_start >= slice_end {
+            continue;
+        }
+
+        let local_start = slice_start - segment.byte_range.start;
+        let local_end = slice_end - segment.byte_range.start;
+        for glyph in segment.glyphs.iter() {
+            if glyph.cluster_byte < local_start || glyph.cluster_byte >= local_end {
+                continue;
+            }
+            glyphs.push(LayoutGlyph {
+                face_id: glyph.face_id,
+                glyph_id: glyph.glyph_id,
+                x: pen_x,
+                advance: glyph.advance,
+                x_offset: glyph.x_offset,
+                y_offset: glyph.y_offset,
+            });
+            pen_x += glyph.advance;
+        }
+    }
+
+    let extracted = extract_text(prepared, run.start, run.end, prepared.white_space());
+    if line_has_hyphen && run.text.ends_with('-') && !extracted.ends_with('-') {
+        for glyph in prepared.hyphen_glyphs() {
+            glyphs.push(LayoutGlyph {
+                face_id: glyph.face_id,
+                glyph_id: glyph.glyph_id,
+                x: pen_x,
+                advance: glyph.advance,
+                x_offset: glyph.x_offset,
+                y_offset: glyph.y_offset,
+            });
+            pen_x += glyph.advance;
+        }
+    }
+
+    glyphs
+}
+
+fn shift_glyphs_x(glyphs: &mut [LayoutGlyph], delta: f32) {
+    if delta == 0.0 {
+        return;
+    }
+    for glyph in glyphs {
+        glyph.x += delta;
+    }
+}
+
+fn cursor_byte_pos(prepared: &PreparedText, cursor: LayoutCursor) -> usize {
+    if let Some(segment) = prepared.seg_meta().get(cursor.segment_index) {
+        if let Some(grapheme) = segment.graphemes.get(cursor.grapheme_index) {
+            return grapheme.byte_range.start;
+        }
+        return segment.byte_range.end;
+    }
+    prepared.text().len()
+}
+
+enum EitherSegmentIter {
+    Forward(std::ops::RangeInclusive<usize>),
+    Reverse(std::ops::RangeInclusive<usize>),
+}
+
+impl Iterator for EitherSegmentIter {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Forward(range) => range.next(),
+            Self::Reverse(range) => range.next_back(),
+        }
+    }
 }
 
 fn materialize_line(

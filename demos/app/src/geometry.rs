@@ -1,5 +1,9 @@
 use resvg::usvg;
 
+const WRAP_HULL_ALPHA_THRESHOLD: u8 = 12;
+const WRAP_HULL_SMOOTH_RADIUS: i32 = 6;
+const WRAP_HULL_MAX_ROW_SAMPLES: usize = 52;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
     pub x: f32,
@@ -240,31 +244,91 @@ pub fn svg_alpha_hull(svg_bytes: &[u8], raster_size: [usize; 2]) -> Option<Vec<P
     let transform = tiny_skia::Transform::from_scale(scale_x, scale_y);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-    let mut opaque_points = Vec::new();
-    let threshold = 12u8;
     let width = raster_size[0] as i32;
     let height = raster_size[1] as i32;
+    let mut lefts = vec![None; height as usize];
+    let mut rights = vec![None; height as usize];
+    let mut valid_rows = Vec::new();
 
     for y in 0..height {
+        let mut left = None;
+        let mut right = None;
         for x in 0..width {
             let alpha = alpha_at(pixmap.data(), width, x, y);
-            if alpha < threshold {
+            if alpha < WRAP_HULL_ALPHA_THRESHOLD {
                 continue;
             }
-            if is_boundary_pixel(pixmap.data(), width, height, x, y, threshold) {
-                opaque_points.push(Point {
-                    x: x as f32,
-                    y: y as f32,
-                });
+            if left.is_none() {
+                left = Some(x as f32);
             }
+            right = Some((x + 1) as f32);
+        }
+        if let (Some(left), Some(right)) = (left, right) {
+            lefts[y as usize] = Some(left);
+            rights[y as usize] = Some(right);
+            valid_rows.push(y as usize);
         }
     }
 
-    if opaque_points.is_empty() {
+    if valid_rows.is_empty() {
         return None;
     }
 
-    let hull = alpha_hull(&opaque_points);
+    let mut smoothed_lefts = vec![0.0f32; height as usize];
+    let mut smoothed_rights = vec![0.0f32; height as usize];
+    for &row in &valid_rows {
+        let mut left_sum = 0.0f32;
+        let mut right_sum = 0.0f32;
+        let mut count = 0.0f32;
+
+        for sample in
+            (row as i32 - WRAP_HULL_SMOOTH_RADIUS)..=(row as i32 + WRAP_HULL_SMOOTH_RADIUS)
+        {
+            if sample < 0 || sample >= height {
+                continue;
+            }
+            let sample = sample as usize;
+            let (Some(left), Some(right)) = (lefts[sample], rights[sample]) else {
+                continue;
+            };
+            left_sum += left;
+            right_sum += right;
+            count += 1.0;
+        }
+
+        if count == 0.0 {
+            continue;
+        }
+
+        smoothed_lefts[row] = left_sum / count;
+        smoothed_rights[row] = right_sum / count;
+    }
+
+    let step = (valid_rows.len() / WRAP_HULL_MAX_ROW_SAMPLES).max(1);
+    let mut sampled_rows = Vec::new();
+    let mut index = 0usize;
+    while index < valid_rows.len() {
+        sampled_rows.push(valid_rows[index]);
+        index += step;
+    }
+    if sampled_rows.last().copied() != valid_rows.last().copied() {
+        sampled_rows.push(*valid_rows.last().expect("valid rows should be non-empty"));
+    }
+
+    let mut hull = Vec::with_capacity(sampled_rows.len() * 2);
+    for &row in &sampled_rows {
+        hull.push(Point {
+            x: smoothed_lefts[row],
+            y: row as f32 + 0.5,
+        });
+    }
+    for &row in sampled_rows.iter().rev() {
+        hull.push(Point {
+            x: smoothed_rights[row],
+            y: row as f32 + 0.5,
+        });
+    }
+
     let bounds = hull_bounds(&hull)?;
     let width = bounds.width.max(1.0);
     let height = bounds.height.max(1.0);
@@ -302,21 +366,6 @@ fn polygon_xs_at_y(points: &[Point], y: f32) -> Vec<f32> {
 fn alpha_at(data: &[u8], width: i32, x: i32, y: i32) -> u8 {
     let index = ((y * width + x) * 4 + 3) as usize;
     data.get(index).copied().unwrap_or(0)
-}
-
-fn is_boundary_pixel(data: &[u8], width: i32, height: i32, x: i32, y: i32, threshold: u8) -> bool {
-    const NEIGHBORS: &[(i32, i32)] = &[(-1, 0), (1, 0), (0, -1), (0, 1)];
-    for &(dx, dy) in NEIGHBORS {
-        let nx = x + dx;
-        let ny = y + dy;
-        if nx < 0 || ny < 0 || nx >= width || ny >= height {
-            return true;
-        }
-        if alpha_at(data, width, nx, ny) < threshold {
-            return true;
-        }
-    }
-    false
 }
 
 #[cfg(test)]
