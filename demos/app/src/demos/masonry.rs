@@ -139,7 +139,7 @@ impl DemoWindow for MasonryDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1960.0, 1280.0))
+            .default_size(egui::vec2(1080.0, 1260.0))
             .show(ctx, |ui| {
                 ui.painter()
                     .rect_filled(ui.max_rect(), CornerRadius::ZERO, PAGE_FILL);

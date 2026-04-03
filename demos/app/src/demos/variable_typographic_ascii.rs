@@ -285,7 +285,7 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(3080.0, 1640.0))
+            .default_size(egui::vec2(1080.0, 1520.0))
             .frame(window_frame)
             .show(ctx, |ui| {
                 paint_window_background(ui.painter(), ui.max_rect());

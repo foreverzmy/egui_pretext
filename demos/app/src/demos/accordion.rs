@@ -316,7 +316,7 @@ impl AccordionDemo {
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
-            .default_size(egui::vec2(1720.0, 1280.0))
+            .default_size(egui::vec2(900.0, 1180.0))
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {

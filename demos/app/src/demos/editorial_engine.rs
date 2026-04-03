@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eframe::egui;
@@ -97,11 +98,18 @@ const GUTTER: f32 = 48.0;
 const COL_GAP: f32 = 40.0;
 const BOTTOM_GAP: f32 = 20.0;
 const NARROW_BREAKPOINT: f32 = 760.0;
+const COMPACT_BREAKPOINT: f32 = 980.0;
 const NARROW_GUTTER: f32 = 20.0;
 const NARROW_COL_GAP: f32 = 20.0;
 const NARROW_BOTTOM_GAP: f32 = 16.0;
 const NARROW_ORB_SCALE: f32 = 0.58;
 const NARROW_ACTIVE_ORBS: usize = 3;
+const COMPACT_GUTTER: f32 = 32.0;
+const COMPACT_COL_GAP: f32 = 28.0;
+const COMPACT_BOTTOM_GAP: f32 = 18.0;
+const COMPACT_ORB_SCALE: f32 = 0.72;
+const COMPACT_ACTIVE_ORBS: usize = 4;
+const HEADLINE_COMPACT_MAX_SIZE: i32 = 56;
 const PAGE_MIN_HEIGHT: f32 = 520.0;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const REFLOW_BUCKET_PX: f32 = 2.0;
@@ -112,6 +120,22 @@ const ORB_SHADOW_1_ALPHA: f32 = 0.18;
 const ORB_SHADOW_2_BLUR: f32 = 120.0;
 const ORB_SHADOW_2_SPREAD: f32 = 40.0;
 const ORB_SHADOW_2_ALPHA: f32 = 0.07;
+const FULL_ORB_SHADOW_PROFILE: OrbShadowProfile = OrbShadowProfile {
+    shadow_1_blur: ORB_SHADOW_1_BLUR,
+    shadow_1_spread: ORB_SHADOW_1_SPREAD,
+    shadow_1_alpha: ORB_SHADOW_1_ALPHA,
+    shadow_2_blur: ORB_SHADOW_2_BLUR,
+    shadow_2_spread: ORB_SHADOW_2_SPREAD,
+    shadow_2_alpha: ORB_SHADOW_2_ALPHA,
+};
+const REDUCED_ORB_SHADOW_PROFILE: OrbShadowProfile = OrbShadowProfile {
+    shadow_1_blur: ORB_SHADOW_1_BLUR * 0.62,
+    shadow_1_spread: ORB_SHADOW_1_SPREAD * 0.6,
+    shadow_1_alpha: ORB_SHADOW_1_ALPHA * 0.78,
+    shadow_2_blur: ORB_SHADOW_2_BLUR * 0.6,
+    shadow_2_spread: ORB_SHADOW_2_SPREAD * 0.55,
+    shadow_2_alpha: ORB_SHADOW_2_ALPHA * 0.72,
+};
 const BODY_START_CURSOR: LayoutCursor = LayoutCursor {
     segment_index: 0,
     grapheme_index: 1,
@@ -122,6 +146,9 @@ pub struct EditorialEngineDemo {
     orbs: Vec<Orb>,
     drag: Option<DragState>,
     last_time: Option<f64>,
+    headline_paint_style: Option<CachedSizedTextStyle>,
+    hint_line: Option<CachedChromeLine>,
+    credit_line: Option<CachedChromeLine>,
     body_prepared: Option<PreparedTextWithSegments>,
     pull_quote_prepared: Option<Vec<PreparedTextWithSegments>>,
     drop_cap_prepared: Option<PreparedTextWithSegments>,
@@ -181,6 +208,17 @@ struct SizedTexture {
 struct OrbTextureKey {
     diameter_px: u16,
     rgb: [u8; 3],
+    reduced_shadow: bool,
+}
+
+#[derive(Clone, Copy)]
+struct OrbShadowProfile {
+    shadow_1_blur: f32,
+    shadow_1_spread: f32,
+    shadow_1_alpha: f32,
+    shadow_2_blur: f32,
+    shadow_2_spread: f32,
+    shadow_2_alpha: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -207,6 +245,18 @@ struct HeadlineFit {
     font_size: f32,
     line_height: f32,
     lines: Vec<PositionedLine>,
+}
+
+#[derive(Clone)]
+struct CachedSizedTextStyle {
+    size_q: u32,
+    style: Arc<pretext::TextStyleSpec>,
+}
+
+#[derive(Clone)]
+struct CachedChromeLine {
+    engine_revision: u64,
+    line: Arc<PositionedLine>,
 }
 
 #[derive(Clone)]
@@ -304,7 +354,7 @@ struct QuantizedOrb {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BandSlotSignature {
-    slots: Vec<QuantizedInterval>,
+    slots: Arc<[QuantizedInterval]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,6 +396,7 @@ struct PositionedLine {
 struct EditorialLayout {
     page: GeoRect,
     is_narrow: bool,
+    is_compact: bool,
     gutter: f32,
     col_gap: f32,
     bottom_gap: f32,
@@ -369,6 +420,9 @@ impl Default for EditorialEngineDemo {
             orbs: Vec::new(),
             drag: None,
             last_time: None,
+            headline_paint_style: None,
+            hint_line: None,
+            credit_line: None,
             body_prepared: None,
             pull_quote_prepared: None,
             drop_cap_prepared: None,
@@ -405,7 +459,7 @@ impl DemoWindow for EditorialEngineDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(2440.0, 1640.0))
+            .default_size(egui::vec2(1120.0, 1600.0))
             .show(ctx, |ui| {
                 let now = ctx.input(|input| input.time);
                 let available = ui.available_size();
@@ -425,6 +479,24 @@ impl DemoWindow for EditorialEngineDemo {
                 self.ensure_orbs(page);
                 let drop_cap_total_width = self.ensure_drop_cap_total_width(engine);
                 let layout = self.ensure_layout(engine, page, drop_cap_total_width);
+                let headline_text_style =
+                    Arc::clone(self.ensure_headline_paint_style(layout.headline_fit.font_size));
+                let hint_line = (!layout.is_narrow).then(|| {
+                    Self::ensure_cached_chrome_line(
+                        &mut self.hint_line,
+                        engine,
+                        HINT_TEXT,
+                        hint_chrome_style(),
+                    )
+                });
+                let credit_line = (!layout.is_narrow).then(|| {
+                    Self::ensure_cached_chrome_line(
+                        &mut self.credit_line,
+                        engine,
+                        CREDIT_TEXT,
+                        credit_chrome_style(),
+                    )
+                });
                 let dragged_orb_index =
                     handle_orb_interaction(ui, page_rect, &layout, &mut self.orbs, &mut self.drag);
                 let animating = update_orbs(
@@ -449,16 +521,35 @@ impl DemoWindow for EditorialEngineDemo {
                     .take(layout.active_orb_count)
                     .map(|orb| (orb.radius * layout.orb_radius_scale, orb.rgb))
                     .collect::<Vec<_>>();
+                let reduced_orb_shadow = layout.is_compact || layout.is_narrow;
                 let orb_textures = orb_requests
                     .into_iter()
-                    .map(|(radius, rgb)| self.ensure_orb_texture(ctx, radius, rgb))
+                    .map(|(radius, rgb)| {
+                        self.ensure_orb_texture(ctx, radius, rgb, reduced_orb_shadow)
+                    })
                     .collect::<Vec<_>>();
                 let projection = self.ensure_projection(engine, &layout);
 
                 paint_editorial_background(&painter, page_rect, &background_texture);
-                paint_projection(&painter, projection, &layout, ctx, engine, assets);
+                paint_projection(
+                    &painter,
+                    projection,
+                    &layout,
+                    headline_text_style.as_ref(),
+                    ctx,
+                    engine,
+                    assets,
+                );
                 paint_orbs(&painter, &layout, &self.orbs, &orb_textures);
-                paint_editorial_chrome(&painter, page_rect, layout.is_narrow, ctx, engine, assets);
+                paint_editorial_chrome(
+                    &painter,
+                    page_rect,
+                    hint_line.as_deref(),
+                    credit_line.as_deref(),
+                    ctx,
+                    engine,
+                    assets,
+                );
 
                 if animating || self.drag.is_some() {
                     ctx.request_repaint_after(FRAME_INTERVAL);
@@ -481,7 +572,7 @@ impl EditorialEngineDemo {
     fn ensure_body_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.body_prepared.is_none() {
             self.body_prepared =
-                Some(engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options()));
+                Some(engine.prepare_with_segments(BODY_TEXT, body_style(), &normal_options()));
         }
         self.body_prepared
             .as_ref()
@@ -497,7 +588,7 @@ impl EditorialEngineDemo {
                 PULL_QUOTE_TEXTS
                     .iter()
                     .map(|text| {
-                        engine.prepare_with_segments(text, &quote_style(), &normal_options())
+                        engine.prepare_with_segments(text, quote_style(), &normal_options())
                     })
                     .collect(),
             );
@@ -511,7 +602,7 @@ impl EditorialEngineDemo {
         if self.drop_cap_prepared.is_none() {
             self.drop_cap_prepared = Some(engine.prepare_with_segments(
                 &BODY_TEXT.chars().next().unwrap_or('T').to_string(),
-                &drop_cap_style(),
+                drop_cap_style(),
                 &normal_options(),
             ));
         }
@@ -527,6 +618,59 @@ impl EditorialEngineDemo {
         }
         self.drop_cap_total_width
             .expect("editorial drop cap width should exist")
+    }
+
+    fn ensure_headline_paint_style(&mut self, font_size: f32) -> &Arc<pretext::TextStyleSpec> {
+        let size_q = quantize_editorial_value(font_size);
+        if self
+            .headline_paint_style
+            .as_ref()
+            .is_none_or(|cached| cached.size_q != size_q)
+        {
+            self.headline_paint_style = Some(CachedSizedTextStyle {
+                size_q,
+                style: Arc::new(headline_style(font_size)),
+            });
+        }
+        &self
+            .headline_paint_style
+            .as_ref()
+            .expect("editorial headline paint style should exist")
+            .style
+    }
+
+    fn ensure_cached_chrome_line(
+        cache: &mut Option<CachedChromeLine>,
+        engine: &PretextEngine,
+        text: &'static str,
+        style: &pretext::TextStyleSpec,
+    ) -> Arc<PositionedLine> {
+        let engine_revision = engine.revision();
+        if cache
+            .as_ref()
+            .is_none_or(|cached| cached.engine_revision != engine_revision)
+        {
+            let line = build_positioned_single_line(engine, text, style, 0.0, 0.0).unwrap_or(
+                PositionedLine {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    text: text.to_owned(),
+                    visual_runs: Vec::new(),
+                    glyph_runs: Vec::new(),
+                },
+            );
+            *cache = Some(CachedChromeLine {
+                engine_revision,
+                line: Arc::new(line),
+            });
+        }
+        Arc::clone(
+            &cache
+                .as_ref()
+                .expect("editorial chrome line should exist")
+                .line,
+        )
     }
 
     fn ensure_orbs(&mut self, page: GeoRect) {
@@ -582,18 +726,32 @@ impl EditorialEngineDemo {
         ctx: &egui::Context,
         radius: f32,
         rgb: [u8; 3],
+        reduced_shadow: bool,
     ) -> SizedTexture {
         let diameter_px = (radius * 2.0).round().clamp(2.0, u16::MAX as f32) as u16;
-        let key = OrbTextureKey { diameter_px, rgb };
+        let key = OrbTextureKey {
+            diameter_px,
+            rgb,
+            reduced_shadow,
+        };
         if let Some(texture) = self.orb_textures.get(&key) {
             return texture.clone();
         }
 
-        let image = orb_color_image(radius.max(1.0), rgb);
+        let profile = if reduced_shadow {
+            REDUCED_ORB_SHADOW_PROFILE
+        } else {
+            FULL_ORB_SHADOW_PROFILE
+        };
+        let image = orb_color_image(radius.max(1.0), rgb, profile);
         let texture = ctx.load_texture(
             format!(
-                "editorial/orb/{}-{}-{}-{}",
-                diameter_px, rgb[0], rgb[1], rgb[2]
+                "editorial/orb/{}-{}-{}-{}-{}",
+                diameter_px,
+                rgb[0],
+                rgb[1],
+                rgb[2],
+                if reduced_shadow { "reduced" } else { "full" }
             ),
             image,
             TextureOptions::LINEAR,
@@ -807,71 +965,66 @@ fn orb_bucket_signature_for_layout(layout: &EditorialLayout, orbs: &[Orb]) -> Or
     }
 }
 
-fn serif_families() -> Vec<String> {
-    vec![
-        "Iowan Old Style".to_owned(),
-        "Palatino Linotype".to_owned(),
-        "Book Antiqua".to_owned(),
-        "Palatino".to_owned(),
-        "Georgia".to_owned(),
-        "Times New Roman".to_owned(),
-        "Noto Serif".to_owned(),
-        "Noto Sans".to_owned(),
-    ]
-}
+const EDITORIAL_SERIF_FAMILIES: &[&str] = &[
+    "Iowan Old Style",
+    "Palatino Linotype",
+    "Book Antiqua",
+    "Palatino",
+    "Georgia",
+    "Times New Roman",
+    "Noto Serif",
+    "Noto Sans",
+];
+const EDITORIAL_SANS_FAMILIES: &[&str] = &["Helvetica Neue", "Helvetica", "Arial", "Noto Sans"];
 
-fn sans_families() -> Vec<String> {
-    vec![
-        "Helvetica Neue".to_owned(),
-        "Helvetica".to_owned(),
-        "Arial".to_owned(),
-        "Noto Sans".to_owned(),
-    ]
-}
-
-fn body_style() -> pretext::TextStyleSpec {
+fn build_text_style(
+    families: &[&str],
+    size_px: f32,
+    weight: u16,
+    italic: bool,
+) -> pretext::TextStyleSpec {
     pretext::TextStyleSpec {
-        families: serif_families(),
-        size_px: 18.0,
-        weight: 400,
-        italic: false,
+        families: families.iter().map(|name| (*name).to_owned()).collect(),
+        size_px,
+        weight,
+        italic,
     }
 }
 
-fn quote_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
-        families: serif_families(),
-        size_px: QUOTE_TEXT_SIZE,
-        weight: 400,
-        italic: true,
-    }
+fn body_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| build_text_style(EDITORIAL_SERIF_FAMILIES, 18.0, 400, false))
+}
+
+fn quote_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| build_text_style(EDITORIAL_SERIF_FAMILIES, QUOTE_TEXT_SIZE, 400, true))
 }
 
 fn headline_style(size_px: f32) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
-        families: serif_families(),
-        size_px,
-        weight: 700,
-        italic: false,
-    }
+    build_text_style(EDITORIAL_SERIF_FAMILIES, size_px, 700, false)
 }
 
-fn drop_cap_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
-        families: serif_families(),
-        size_px: BODY_LINE_HEIGHT * DROP_CAP_LINES as f32 - 4.0,
-        weight: 700,
-        italic: false,
-    }
+fn drop_cap_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| {
+        build_text_style(
+            EDITORIAL_SERIF_FAMILIES,
+            BODY_LINE_HEIGHT * DROP_CAP_LINES as f32 - 4.0,
+            700,
+            false,
+        )
+    })
 }
 
-fn chrome_style(size_px: f32) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
-        families: sans_families(),
-        size_px,
-        weight: 400,
-        italic: false,
-    }
+fn hint_chrome_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| build_text_style(EDITORIAL_SANS_FAMILIES, 13.0, 400, false))
+}
+
+fn credit_chrome_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| build_text_style(EDITORIAL_SANS_FAMILIES, 11.0, 400, false))
 }
 
 fn editorial_background_image(size: [usize; 2]) -> ColorImage {
@@ -918,8 +1071,8 @@ fn editorial_background_image(size: [usize; 2]) -> ColorImage {
     ColorImage::new([width, height], pixels)
 }
 
-fn orb_color_image(radius: f32, rgb: [u8; 3]) -> ColorImage {
-    let shadow_extent = (ORB_SHADOW_2_SPREAD + ORB_SHADOW_2_BLUR).ceil();
+fn orb_color_image(radius: f32, rgb: [u8; 3], shadow: OrbShadowProfile) -> ColorImage {
+    let shadow_extent = (shadow.shadow_2_spread + shadow.shadow_2_blur).ceil();
     let orb_diameter = (radius * 2.0).ceil();
     let size = (orb_diameter + shadow_extent * 2.0).max(4.0) as usize;
     let center = size as f32 * 0.5;
@@ -947,12 +1100,18 @@ fn orb_color_image(radius: f32, rgb: [u8; 3]) -> ColorImage {
                 let dy = py - center;
                 let dist = (dx * dx + dy * dy).sqrt();
 
-                let shadow_1 =
-                    css_like_shadow_alpha(dist, radius, ORB_SHADOW_1_SPREAD, ORB_SHADOW_1_BLUR)
-                        * ORB_SHADOW_1_ALPHA;
-                let shadow_2 =
-                    css_like_shadow_alpha(dist, radius, ORB_SHADOW_2_SPREAD, ORB_SHADOW_2_BLUR)
-                        * ORB_SHADOW_2_ALPHA;
+                let shadow_1 = css_like_shadow_alpha(
+                    dist,
+                    radius,
+                    shadow.shadow_1_spread,
+                    shadow.shadow_1_blur,
+                ) * shadow.shadow_1_alpha;
+                let shadow_2 = css_like_shadow_alpha(
+                    dist,
+                    radius,
+                    shadow.shadow_2_spread,
+                    shadow.shadow_2_blur,
+                ) * shadow.shadow_2_alpha;
 
                 let fill_alpha = if dist <= radius {
                     let gradient_dist = ((px - gradient_center_x).powi(2)
@@ -1147,17 +1306,40 @@ fn build_editorial_layout(
     engine: &PretextEngine,
     drop_cap_total_width: f32,
 ) -> EditorialLayout {
-    let is_narrow = page.width < NARROW_BREAKPOINT;
-    let gutter = if is_narrow { NARROW_GUTTER } else { GUTTER };
-    let col_gap = if is_narrow { NARROW_COL_GAP } else { COL_GAP };
+    let is_narrow = page.width <= NARROW_BREAKPOINT;
+    let is_compact = !is_narrow && page.width <= COMPACT_BREAKPOINT;
+    let gutter = if is_narrow {
+        NARROW_GUTTER
+    } else if is_compact {
+        COMPACT_GUTTER
+    } else {
+        GUTTER
+    };
+    let col_gap = if is_narrow {
+        NARROW_COL_GAP
+    } else if is_compact {
+        COMPACT_COL_GAP
+    } else {
+        COL_GAP
+    };
     let bottom_gap = if is_narrow {
         NARROW_BOTTOM_GAP
+    } else if is_compact {
+        COMPACT_BOTTOM_GAP
     } else {
         BOTTOM_GAP
     };
-    let orb_radius_scale = if is_narrow { NARROW_ORB_SCALE } else { 1.0 };
+    let orb_radius_scale = if is_narrow {
+        NARROW_ORB_SCALE
+    } else if is_compact {
+        COMPACT_ORB_SCALE
+    } else {
+        1.0
+    };
     let active_orb_count = if is_narrow {
         NARROW_ACTIVE_ORBS
+    } else if is_compact {
+        COMPACT_ACTIVE_ORBS
     } else {
         orb_definitions().len()
     };
@@ -1166,21 +1348,48 @@ fn build_editorial_layout(
         x: page.x + gutter,
         y: page.y + gutter,
     };
-    let headline_width =
-        (page.width - gutter * 2.0 - if is_narrow { 12.0 } else { 0.0 }).min(HEADLINE_MAX_WIDTH);
-    let max_headline_height = (page.height * if is_narrow { 0.2 } else { 0.24 }).floor();
+    let headline_width = (page.width
+        - gutter * 2.0
+        - if is_narrow {
+            12.0
+        } else if is_compact {
+            6.0
+        } else {
+            0.0
+        })
+    .min(HEADLINE_MAX_WIDTH);
+    let max_headline_height = (page.height
+        * if is_narrow {
+            0.2
+        } else if is_compact {
+            0.22
+        } else {
+            0.24
+        })
+    .floor();
     let headline_fit = fit_headline(
         engine,
         headline_width,
         max_headline_height,
         if is_narrow {
             HEADLINE_NARROW_MAX_SIZE
+        } else if is_compact {
+            HEADLINE_COMPACT_MAX_SIZE
         } else {
             HEADLINE_MAX_SIZE
         },
     );
     let headline_height = headline_fit.lines.len() as f32 * headline_fit.line_height;
-    let body_top = page.y + gutter + headline_height + if is_narrow { 14.0 } else { 20.0 };
+    let body_top = page.y
+        + gutter
+        + headline_height
+        + if is_narrow {
+            14.0
+        } else if is_compact {
+            16.0
+        } else {
+            20.0
+        };
     let body_height = (page.height - (body_top - page.y) - bottom_gap).max(BODY_LINE_HEIGHT);
     let column_count = if page.width > 1000.0 {
         3
@@ -1213,6 +1422,7 @@ fn build_editorial_layout(
     EditorialLayout {
         page,
         is_narrow,
+        is_compact,
         gutter,
         col_gap,
         bottom_gap,
@@ -1359,6 +1569,20 @@ fn build_static_body_rect_obstacles(
         .into_iter()
         .map(Vec::into_boxed_slice)
         .collect()
+}
+
+fn band_slot_signature_from_slots(slots: &[Interval]) -> BandSlotSignature {
+    BandSlotSignature {
+        slots: Arc::from(
+            slots
+                .iter()
+                .map(|slot| QuantizedInterval {
+                    left_q: quantize_reflow_bucket(slot.left),
+                    right_q: quantize_reflow_bucket(slot.right),
+                })
+                .collect::<Vec<_>>(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1622,12 +1846,14 @@ fn build_body_column_plan_incremental(
 
     for band_index in dirty_start..=dirty_end {
         let line_top = column.y + band_index as f32 * BODY_LINE_HEIGHT;
+        let recycled_slots = std::mem::take(&mut cached.bands[band_index].slots);
         cached.bands[band_index] = build_body_band_plan(
             column,
             line_top,
             circle_obstacles,
             rect_obstacles,
             single_slot_only,
+            recycled_slots,
             scratch,
         );
     }
@@ -1650,6 +1876,7 @@ fn build_body_column_plan(
             circle_obstacles,
             rect_obstacles,
             single_slot_only,
+            Vec::new(),
             scratch,
         ));
         line_top += BODY_LINE_HEIGHT;
@@ -1744,6 +1971,7 @@ fn build_body_band_plan(
     circle_obstacles: &[CircleObstacle],
     rect_obstacles: &[RectObstacle],
     single_slot_only: bool,
+    mut slots: Vec<Interval>,
     scratch: &mut EditorialBandScratch,
 ) -> BodyBandPlan {
     let band_top = line_top;
@@ -1765,42 +1993,32 @@ fn build_body_band_plan(
         &mut scratch.scratch_slots,
     );
     let ordered_slots = if single_slot_only {
-        scratch
-            .slots
-            .iter()
-            .copied()
-            .reduce(|best, slot| {
-                let best_width = best.right - best.left;
-                let slot_width = slot.right - slot.left;
-                if slot_width > best_width {
-                    slot
-                } else if slot_width < best_width {
-                    best
-                } else if slot.left < best.left {
-                    slot
-                } else {
-                    best
-                }
-            })
-            .into_iter()
-            .collect::<Vec<_>>()
+        slots.clear();
+        if let Some(slot) = scratch.slots.iter().copied().reduce(|best, slot| {
+            let best_width = best.right - best.left;
+            let slot_width = slot.right - slot.left;
+            if slot_width > best_width {
+                slot
+            } else if slot_width < best_width {
+                best
+            } else if slot.left < best.left {
+                slot
+            } else {
+                best
+            }
+        }) {
+            slots.push(slot);
+        }
+        slots
     } else {
-        let mut ordered = scratch.slots.clone();
-        ordered.sort_by(|a, b| a.left.total_cmp(&b.left));
-        ordered
+        scratch.slots.sort_by(|a, b| a.left.total_cmp(&b.left));
+        std::mem::swap(&mut scratch.slots, &mut slots);
+        slots
     };
 
     BodyBandPlan {
         line_top,
-        signature: BandSlotSignature {
-            slots: ordered_slots
-                .iter()
-                .map(|slot| QuantizedInterval {
-                    left_q: quantize_reflow_bucket(slot.left),
-                    right_q: quantize_reflow_bucket(slot.right),
-                })
-                .collect(),
-        },
+        signature: band_slot_signature_from_slots(&ordered_slots),
         slots: ordered_slots,
     }
 }
@@ -2218,7 +2436,15 @@ fn update_orbs(
             let dx = b.x - a.x;
             let dy = b.y - a.y;
             let dist = (dx * dx + dy * dy).sqrt();
-            let min_dist = a_radius + b_radius + if layout.is_narrow { 12.0 } else { 20.0 };
+            let min_dist = a_radius
+                + b_radius
+                + if layout.is_narrow {
+                    12.0
+                } else if layout.is_compact {
+                    16.0
+                } else {
+                    20.0
+                };
             if dist >= min_dist || dist <= 0.1 {
                 continue;
             }
@@ -2255,31 +2481,28 @@ fn paint_projection(
     painter: &egui::Painter,
     projection: EditorialProjectionRef<'_>,
     layout: &EditorialLayout,
+    headline_text_style: &pretext::TextStyleSpec,
     ctx: &egui::Context,
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
-    let headline_text_style = headline_style(layout.headline_fit.font_size);
-    let drop_cap_text_style = drop_cap_style();
-    let quote_text_style = quote_style();
-    let body_text_style = body_style();
     let headline_options = fragment_paint_options(
-        &headline_text_style,
+        headline_text_style,
         layout.headline_fit.line_height,
         Color32::WHITE,
     );
     let drop_cap_options = fragment_paint_options(
-        &drop_cap_text_style,
+        drop_cap_style(),
         BODY_LINE_HEIGHT * DROP_CAP_LINES as f32 - 4.0,
         Color32::from_rgb(196, 163, 90),
     );
     let quote_options = fragment_paint_options(
-        &quote_text_style,
+        quote_style(),
         QUOTE_LINE_HEIGHT,
         Color32::from_rgb(184, 160, 112),
     );
     let body_options = fragment_paint_options(
-        &body_text_style,
+        body_style(),
         BODY_LINE_HEIGHT,
         Color32::from_rgb(232, 228, 220),
     );
@@ -2331,47 +2554,6 @@ fn paint_projection(
         engine,
         assets,
     );
-    let _ = fragment_painter.finish(painter, ctx, assets);
-}
-
-fn paint_positioned_lines(
-    painter: &egui::Painter,
-    lines: &[PositionedLine],
-    style: &pretext::TextStyleSpec,
-    line_height: f32,
-    _slack_y: f32,
-    color: Color32,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-) {
-    paint_positioned_line_iter(
-        painter,
-        lines.iter(),
-        style,
-        line_height,
-        _slack_y,
-        color,
-        ctx,
-        engine,
-        assets,
-    );
-}
-
-fn paint_positioned_line_iter<'a>(
-    painter: &egui::Painter,
-    lines: impl IntoIterator<Item = &'a PositionedLine>,
-    style: &pretext::TextStyleSpec,
-    line_height: f32,
-    _slack_y: f32,
-    color: Color32,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-) {
-    let options = fragment_paint_options(style, line_height, color);
-    let mut fragment_painter = PretextFragmentPainter::new(assets);
-    queue_positioned_lines(&mut fragment_painter, lines, &options, ctx, engine, assets);
     let _ = fragment_painter.finish(painter, ctx, assets);
 }
 
@@ -2440,22 +2622,29 @@ fn paint_orbs(
 fn paint_editorial_chrome(
     painter: &egui::Painter,
     rect: Rect,
-    is_narrow: bool,
+    hint_line: Option<&PositionedLine>,
+    credit_line: Option<&PositionedLine>,
     ctx: &egui::Context,
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
-    if !is_narrow {
-        let hint_style = chrome_style(13.0);
-        let mut hint_line = build_positioned_single_line(engine, HINT_TEXT, &hint_style, 0.0, 0.0)
-            .unwrap_or(PositionedLine {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                text: HINT_TEXT.to_owned(),
-                visual_runs: Vec::new(),
-                glyph_runs: Vec::new(),
-            });
+    if hint_line.is_none() && credit_line.is_none() {
+        return;
+    }
+
+    let hint_options = fragment_paint_options(
+        hint_chrome_style(),
+        13.0,
+        Color32::from_rgba_premultiplied(255, 255, 255, 56),
+    );
+    let credit_options = fragment_paint_options(
+        credit_chrome_style(),
+        11.0,
+        Color32::from_rgba_premultiplied(255, 255, 255, 72),
+    );
+    let mut fragment_painter = PretextFragmentPainter::new(assets);
+
+    if let Some(hint_line) = hint_line {
         let hint_rect = Rect::from_min_size(
             egui::pos2(
                 rect.center().x - (hint_line.width + 36.0) * 0.5,
@@ -2463,51 +2652,39 @@ fn paint_editorial_chrome(
             ),
             egui::vec2(hint_line.width + 36.0, 29.0),
         );
-        hint_line.x = hint_rect.left() + 18.0;
-        hint_line.y = hint_rect.top() + 8.0;
         painter.rect_filled(
             hint_rect,
             CornerRadius::same(255),
             Color32::from_rgba_premultiplied(0, 0, 0, 115),
         );
-        paint_positioned_lines(
-            painter,
-            std::slice::from_ref(&hint_line),
-            &hint_style,
-            13.0,
-            2.0,
-            Color32::from_rgba_premultiplied(255, 255, 255, 56),
-            ctx,
-            engine,
-            assets,
-        );
-
-        let credit_style = chrome_style(11.0);
-        let mut credit_line =
-            build_positioned_single_line(engine, CREDIT_TEXT, &credit_style, 0.0, 0.0).unwrap_or(
-                PositionedLine {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    text: CREDIT_TEXT.to_owned(),
-                    visual_runs: Vec::new(),
-                    glyph_runs: Vec::new(),
-                },
-            );
-        credit_line.x = rect.right() - 16.0 - credit_line.width;
-        credit_line.y = rect.bottom() - 12.0 - 11.0;
-        paint_positioned_lines(
-            painter,
-            std::slice::from_ref(&credit_line),
-            &credit_style,
-            11.0,
-            2.0,
-            Color32::from_rgba_premultiplied(255, 255, 255, 72),
+        fragment_painter.push_fragment(
+            hint_rect.left() + 18.0,
+            hint_rect.top() + 8.0,
+            &hint_line.text,
+            &hint_line.glyph_runs,
+            &[],
+            &hint_options,
             ctx,
             engine,
             assets,
         );
     }
+
+    if let Some(credit_line) = credit_line {
+        fragment_painter.push_fragment(
+            rect.right() - 16.0 - credit_line.width,
+            rect.bottom() - 12.0 - 11.0,
+            &credit_line.text,
+            &credit_line.glyph_runs,
+            &[],
+            &credit_options,
+            ctx,
+            engine,
+            assets,
+        );
+    }
+
+    let _ = fragment_painter.finish(painter, ctx, assets);
 }
 
 #[cfg(test)]
@@ -2763,10 +2940,10 @@ mod tests {
         let initial_band = BodyBandPlan {
             line_top: 120.0,
             signature: BandSlotSignature {
-                slots: vec![QuantizedInterval {
+                slots: Arc::from(vec![QuantizedInterval {
                     left_q: quantize_reflow_bucket(40.0),
                     right_q: quantize_reflow_bucket(240.0),
-                }],
+                }]),
             },
             slots: vec![Interval {
                 left: 40.0,
@@ -2776,10 +2953,10 @@ mod tests {
         let next_band = BodyBandPlan {
             line_top: 120.0,
             signature: BandSlotSignature {
-                slots: vec![QuantizedInterval {
+                slots: Arc::from(vec![QuantizedInterval {
                     left_q: quantize_reflow_bucket(40.0),
                     right_q: quantize_reflow_bucket(180.0),
-                }],
+                }]),
             },
             slots: vec![Interval {
                 left: 40.0,
@@ -2809,6 +2986,88 @@ mod tests {
         assert!(!second.lines.is_empty());
         assert_eq!(second.lines.as_ptr(), baseline_ptr);
         assert_ne!(baseline_lines, second.lines);
+    }
+
+    #[test]
+    fn build_body_band_plan_recycles_supplied_slot_storage() {
+        let region = GeoRect {
+            x: 40.0,
+            y: 120.0,
+            width: 380.0,
+            height: BODY_LINE_HEIGHT * 2.0,
+        };
+        let first_obstacles = [
+            RectObstacle {
+                rect: GeoRect {
+                    x: 70.0,
+                    y: 120.0,
+                    width: 30.0,
+                    height: BODY_LINE_HEIGHT,
+                },
+            },
+            RectObstacle {
+                rect: GeoRect {
+                    x: 150.0,
+                    y: 120.0,
+                    width: 80.0,
+                    height: BODY_LINE_HEIGHT,
+                },
+            },
+            RectObstacle {
+                rect: GeoRect {
+                    x: 280.0,
+                    y: 120.0,
+                    width: 60.0,
+                    height: BODY_LINE_HEIGHT,
+                },
+            },
+        ];
+        let second_obstacles = [
+            RectObstacle {
+                rect: GeoRect {
+                    x: 96.0,
+                    y: 120.0,
+                    width: 92.0,
+                    height: BODY_LINE_HEIGHT,
+                },
+            },
+            RectObstacle {
+                rect: GeoRect {
+                    x: 242.0,
+                    y: 120.0,
+                    width: 42.0,
+                    height: BODY_LINE_HEIGHT,
+                },
+            },
+        ];
+        let mut scratch = EditorialBandScratch::default();
+
+        let first = build_body_band_plan(
+            region,
+            120.0,
+            &[],
+            &first_obstacles,
+            false,
+            Vec::new(),
+            &mut scratch,
+        );
+        assert!(!first.slots.is_empty());
+        let baseline_ptr = first.slots.as_ptr();
+        let baseline_slots = first.slots.clone();
+
+        let second = build_body_band_plan(
+            region,
+            120.0,
+            &[],
+            &second_obstacles,
+            false,
+            first.slots,
+            &mut scratch,
+        );
+
+        assert!(!second.slots.is_empty());
+        assert_ne!(baseline_slots, second.slots);
+        assert_eq!(scratch.slots.as_ptr(), baseline_ptr);
     }
 
     #[test]
@@ -3149,6 +3408,41 @@ mod tests {
     }
 
     #[test]
+    fn reduced_orb_shadow_profile_uses_smaller_texture() {
+        let full = orb_color_image(72.0, [150, 100, 220], FULL_ORB_SHADOW_PROFILE);
+        let reduced = orb_color_image(72.0, [150, 100, 220], REDUCED_ORB_SHADOW_PROFILE);
+
+        assert!(reduced.size[0] < full.size[0]);
+        assert_eq!(reduced.size[0], reduced.size[1]);
+    }
+
+    #[test]
+    fn default_width_layout_uses_compact_editorial_tuning() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let layout = build_editorial_layout(
+            GeoRect {
+                x: 0.0,
+                y: 0.0,
+                width: 960.0,
+                height: 760.0,
+            },
+            &engine,
+            measure_single_line_width(&engine, &drop_cap).ceil() + 10.0,
+        );
+
+        assert!(!layout.is_narrow);
+        assert!(layout.is_compact);
+        assert_eq!(layout.column_count, 2);
+        assert_eq!(layout.active_orb_count, COMPACT_ACTIVE_ORBS);
+        assert_eq!(layout.orb_radius_scale, COMPACT_ORB_SCALE);
+        assert!(layout.column_width >= 430.0);
+    }
+
+    #[test]
     fn static_projection_precomputes_body_rect_obstacles_per_column() {
         let page = GeoRect {
             x: 0.0,
@@ -3184,6 +3478,41 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn headline_paint_style_cache_reuses_arc_for_same_size() {
+        let mut demo = EditorialEngineDemo::default();
+        let first = Arc::clone(demo.ensure_headline_paint_style(56.0));
+        let second = Arc::clone(demo.ensure_headline_paint_style(56.0));
+        let third = Arc::clone(demo.ensure_headline_paint_style(60.0));
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &third));
+    }
+
+    #[test]
+    fn chrome_line_cache_reuses_positioned_line_for_same_engine_revision() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut cache = None;
+
+        let first = EditorialEngineDemo::ensure_cached_chrome_line(
+            &mut cache,
+            &engine,
+            HINT_TEXT,
+            hint_chrome_style(),
+        );
+        let second = EditorialEngineDemo::ensure_cached_chrome_line(
+            &mut cache,
+            &engine,
+            HINT_TEXT,
+            hint_chrome_style(),
+        );
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     fn extract_js_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

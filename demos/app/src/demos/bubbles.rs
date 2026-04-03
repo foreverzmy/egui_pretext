@@ -185,7 +185,7 @@ impl BubblesDemo {
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
-            .default_size(egui::vec2(3200.0, 1800.0))
+            .default_size(egui::vec2(1040.0, 1720.0))
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {

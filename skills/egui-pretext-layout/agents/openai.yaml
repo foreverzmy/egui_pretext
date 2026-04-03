@@ -1,0 +1,4 @@
+interface:
+  display_name: "egui + pretext Layout"
+  short_description: "Compose egui UI with pretext text layout"
+  default_prompt: "Use $egui-pretext-layout to implement or refactor layout code that mixes egui widgets and painting with pretext text preparation, line layout, or glyph-run rendering."

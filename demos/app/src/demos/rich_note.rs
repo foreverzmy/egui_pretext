@@ -315,7 +315,7 @@ impl DemoWindow for RichNoteDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1960.0, 1440.0))
+            .default_size(egui::vec2(1020.0, 1480.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])

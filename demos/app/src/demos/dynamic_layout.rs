@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use eframe::egui;
@@ -139,6 +139,7 @@ const LOGO_RASTER_SIZE: [usize; 2] = [512, 512];
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const HINT_PILL_SAFE_TOP: f32 = 72.0;
 const NARROW_BREAKPOINT: f32 = 760.0;
+const COMPACT_BREAKPOINT: f32 = 980.0;
 const NARROW_COLUMN_MAX_WIDTH: f32 = 430.0;
 const UNBOUNDED_WIDTH: f32 = 100_000.0;
 const DYNAMIC_REFLOW_BUCKET_PX: f32 = 2.0;
@@ -148,6 +149,7 @@ pub struct DynamicLayoutDemo {
     openai_logo: LogoAnimationState,
     claude_logo: LogoAnimationState,
     prepared_engine_revision: Option<u64>,
+    headline_paint_style: Option<CachedSizedTextStyle>,
     body_prepared: Option<PreparedTextWithSegments>,
     headline_prepared: Option<PreparedTextWithSegments>,
     headline_prepared_size_q: Option<u32>,
@@ -260,6 +262,12 @@ struct DynamicColumnCacheStats {
 }
 
 #[derive(Clone)]
+struct CachedSizedTextStyle {
+    size_q: u32,
+    style: Arc<pretext::TextStyleSpec>,
+}
+
+#[derive(Clone)]
 struct DynamicColumnPlan {
     bands: Vec<DynamicBandPlan>,
 }
@@ -286,7 +294,7 @@ struct CachedDynamicBand {
     exhausted_text: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DynamicBandSignature {
     line_top_q: u32,
     slot: Option<DynamicBandIntervalKey>,
@@ -319,6 +327,7 @@ struct PositionedLine {
 struct PageLayout {
     page: GeoRect,
     is_narrow: bool,
+    is_compact: bool,
     gutter: f32,
     center_gap: f32,
     column_width: f32,
@@ -362,6 +371,7 @@ impl Default for DynamicLayoutDemo {
             openai_logo: LogoAnimationState::default(),
             claude_logo: LogoAnimationState::default(),
             prepared_engine_revision: None,
+            headline_paint_style: None,
             body_prepared: None,
             headline_prepared: None,
             headline_prepared_size_q: None,
@@ -402,7 +412,7 @@ impl DemoWindow for DynamicLayoutDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(2240.0, 1560.0))
+            .default_size(egui::vec2(1180.0, 1480.0))
             .show(ctx, |ui| {
                 let now = ctx.input(|input| input.time);
                 let animating = update_spin_state(&mut self.openai_logo, now)
@@ -416,6 +426,8 @@ impl DemoWindow for DynamicLayoutDemo {
 
                 self.invalidate_engine_caches_if_needed(engine);
                 let layout = self.ensure_layout(page_rect, engine);
+                let headline_text_style =
+                    Arc::clone(self.ensure_headline_paint_style(layout.headline_size));
                 let (openai_geometry, claude_geometry) = self.frame_logo_geometries(engine, layout);
 
                 let painter = ui.painter().clone();
@@ -428,21 +440,18 @@ impl DemoWindow for DynamicLayoutDemo {
                         openai_geometry.scanlines.as_ref(),
                         claude_geometry.scanlines.as_ref(),
                     );
-                    let headline_text_style = headline_style(layout.headline_size);
-                    let credit_text_style = credit_style();
-                    let body_text_style = body_style();
                     let headline_options = fragment_paint_options(
-                        &headline_text_style,
+                        headline_text_style.as_ref(),
                         layout.headline_line_height,
                         Color32::from_rgb(17, 16, 13),
                     );
                     let credit_options = fragment_paint_options(
-                        &credit_text_style,
+                        credit_style(),
                         CREDIT_LINE_HEIGHT,
                         Color32::from_rgba_premultiplied(17, 16, 13, 148),
                     );
                     let body_options = fragment_paint_options(
-                        &body_text_style,
+                        body_style(),
                         BODY_LINE_HEIGHT,
                         Color32::from_rgb(17, 16, 13),
                     );
@@ -488,13 +497,23 @@ impl DemoWindow for DynamicLayoutDemo {
                     &painter,
                     layout.openai_rect,
                     egui::vec2(0.0, layout.openai_rect.height * 0.12),
-                    Color32::from_rgba_premultiplied(16, 16, 12, 34),
+                    Color32::from_rgba_premultiplied(
+                        16,
+                        16,
+                        12,
+                        if layout.is_compact { 24 } else { 34 },
+                    ),
                 );
                 paint_logo_shadow(
                     &painter,
                     layout.claude_rect,
                     egui::vec2(0.0, layout.claude_rect.height * 0.1),
-                    Color32::from_rgba_premultiplied(140, 86, 52, 42),
+                    Color32::from_rgba_premultiplied(
+                        140,
+                        86,
+                        52,
+                        if layout.is_compact { 30 } else { 42 },
+                    ),
                 );
 
                 let openai_texture =
@@ -559,6 +578,7 @@ impl DynamicLayoutDemo {
         }
 
         self.prepared_engine_revision = Some(revision);
+        self.headline_paint_style = None;
         self.body_prepared = None;
         self.headline_prepared = None;
         self.headline_prepared_size_q = None;
@@ -574,7 +594,7 @@ impl DynamicLayoutDemo {
     fn ensure_body_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.body_prepared.is_none() {
             self.body_prepared =
-                Some(engine.prepare_with_segments(BODY_COPY, &body_style(), &normal_options()));
+                Some(engine.prepare_with_segments(BODY_COPY, body_style(), &normal_options()));
         }
         self.body_prepared
             .as_ref()
@@ -584,7 +604,7 @@ impl DynamicLayoutDemo {
     fn ensure_credit_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.credit_prepared.is_none() {
             self.credit_prepared =
-                Some(engine.prepare_with_segments(CREDIT_TEXT, &credit_style(), &normal_options()));
+                Some(engine.prepare_with_segments(CREDIT_TEXT, credit_style(), &normal_options()));
         }
         self.credit_prepared
             .as_ref()
@@ -618,6 +638,25 @@ impl DynamicLayoutDemo {
         self.headline_prepared
             .as_ref()
             .expect("dynamic headline should be prepared")
+    }
+
+    fn ensure_headline_paint_style(&mut self, headline_size: f32) -> &Arc<pretext::TextStyleSpec> {
+        let size_q = quantize_dynamic_value(headline_size);
+        if self
+            .headline_paint_style
+            .as_ref()
+            .is_none_or(|cached| cached.size_q != size_q)
+        {
+            self.headline_paint_style = Some(CachedSizedTextStyle {
+                size_q,
+                style: Arc::new(headline_style(headline_size)),
+            });
+        }
+        &self
+            .headline_paint_style
+            .as_ref()
+            .expect("dynamic headline paint style should exist")
+            .style
     }
 
     fn ensure_hulls(&mut self) -> &LogoHulls {
@@ -807,53 +846,44 @@ fn snapped_dynamic_reflow_angle(rect: GeoRect, angle_q: i32) -> f32 {
     angle_q as f32 * dynamic_reflow_bucket_angle(rect)
 }
 
-fn serif_families() -> Vec<String> {
-    vec![
-        "Iowan Old Style".to_owned(),
-        "Palatino Linotype".to_owned(),
-        "Book Antiqua".to_owned(),
-        "Palatino".to_owned(),
-        "Georgia".to_owned(),
-        "Times New Roman".to_owned(),
-        "Noto Serif".to_owned(),
-        "Noto Sans".to_owned(),
-    ]
-}
+const DYNAMIC_SERIF_FAMILIES: &[&str] = &[
+    "Iowan Old Style",
+    "Palatino Linotype",
+    "Book Antiqua",
+    "Palatino",
+    "Georgia",
+    "Times New Roman",
+    "Noto Serif",
+    "Noto Sans",
+];
+const DYNAMIC_SANS_FAMILIES: &[&str] = &["Helvetica Neue", "Helvetica", "Arial", "Noto Sans"];
 
-fn sans_families() -> Vec<String> {
-    vec![
-        "Helvetica Neue".to_owned(),
-        "Helvetica".to_owned(),
-        "Arial".to_owned(),
-        "Noto Sans".to_owned(),
-    ]
-}
-
-fn body_style() -> pretext::TextStyleSpec {
+fn build_text_style(
+    families: &[&str],
+    size_px: f32,
+    weight: u16,
+    italic: bool,
+) -> pretext::TextStyleSpec {
     pretext::TextStyleSpec {
-        families: serif_families(),
-        size_px: 20.0,
-        weight: 450,
-        italic: false,
+        families: families.iter().map(|name| (*name).to_owned()).collect(),
+        size_px,
+        weight,
+        italic,
     }
+}
+
+fn body_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| build_text_style(DYNAMIC_SERIF_FAMILIES, 20.0, 450, false))
 }
 
 fn headline_style(size_px: f32) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
-        families: serif_families(),
-        size_px,
-        weight: 700,
-        italic: false,
-    }
+    build_text_style(DYNAMIC_SERIF_FAMILIES, size_px, 700, false)
 }
 
-fn credit_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
-        families: sans_families(),
-        size_px: 12.0,
-        weight: 500,
-        italic: false,
-    }
+fn credit_style() -> &'static pretext::TextStyleSpec {
+    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+    STYLE.get_or_init(|| build_text_style(DYNAMIC_SANS_FAMILIES, 12.0, 500, false))
 }
 
 fn measure_single_line_width(engine: &PretextEngine, prepared: &PreparedTextWithSegments) -> f32 {
@@ -905,7 +935,8 @@ fn build_page_layout(page_rect: Rect, engine: &PretextEngine) -> PageLayout {
         width: page_rect.width(),
         height: page_rect.height(),
     };
-    let is_narrow = page.width < NARROW_BREAKPOINT;
+    let is_narrow = page.width <= NARROW_BREAKPOINT;
+    let is_compact = page.width <= COMPACT_BREAKPOINT;
 
     if is_narrow {
         let gutter = (page.width * 0.06).clamp(18.0, 28.0).round();
@@ -927,6 +958,7 @@ fn build_page_layout(page_rect: Rect, engine: &PretextEngine) -> PageLayout {
         return PageLayout {
             page,
             is_narrow,
+            is_compact,
             gutter,
             center_gap: 0.0,
             column_width,
@@ -955,31 +987,72 @@ fn build_page_layout(page_rect: Rect, engine: &PretextEngine) -> PageLayout {
         };
     }
 
-    let gutter = (52.0f32.max(page.width * 0.048)).round();
-    let center_gap = (28.0f32.max(page.width * 0.025)).round();
+    let gutter = if is_compact {
+        (44.0f32.max(page.width * 0.044)).round()
+    } else {
+        (52.0f32.max(page.width * 0.048)).round()
+    };
+    let center_gap = if is_compact {
+        (18.0f32.max(page.width * 0.018)).round()
+    } else {
+        (28.0f32.max(page.width * 0.025)).round()
+    };
     let column_width = ((page.width - gutter * 2.0 - center_gap) * 0.5).round();
-    let headline_top = 42.0f32
-        .max(page.width * 0.04)
-        .max(HINT_PILL_SAFE_TOP)
-        .round();
+    let headline_top = if is_compact {
+        38.0f32
+            .max(page.width * 0.036)
+            .max(HINT_PILL_SAFE_TOP)
+            .round()
+    } else {
+        42.0f32
+            .max(page.width * 0.04)
+            .max(HINT_PILL_SAFE_TOP)
+            .round()
+    };
     let headline_width = (page.width - gutter * 2.0)
-        .min(column_width.max(page.width * 0.5))
+        .min(column_width.max(page.width * if is_compact { 0.56 } else { 0.5 }))
         .round();
     let headline_size = fit_headline_font_size(engine, headline_width, page.width);
+    let headline_size = if is_compact {
+        headline_size.min(72.0)
+    } else {
+        headline_size
+    };
     let headline_line_height = (headline_size * 0.92).round();
-    let credit_gap = (14.0f32.max(BODY_LINE_HEIGHT * 0.6)).round();
-    let copy_gap = (20.0f32.max(BODY_LINE_HEIGHT * 0.9)).round();
-    let openai_shrink_t = ((960.0 - page.width) / 260.0).clamp(0.0, 1.0);
-    let openai_size = (400.0 - openai_shrink_t * 56.0)
-        .min(page.height * 0.43)
-        .round();
-    let claude_size = 276.0f32
-        .max((page.width * 0.355).min(page.height * 0.45).min(500.0))
-        .round();
+    let credit_gap = if is_compact {
+        (12.0f32.max(BODY_LINE_HEIGHT * 0.55)).round()
+    } else {
+        (14.0f32.max(BODY_LINE_HEIGHT * 0.6)).round()
+    };
+    let copy_gap = if is_compact {
+        (18.0f32.max(BODY_LINE_HEIGHT * 0.8)).round()
+    } else {
+        (20.0f32.max(BODY_LINE_HEIGHT * 0.9)).round()
+    };
+    let openai_size = if is_compact {
+        336.0f32
+            .max((page.width * 0.33).min(page.height * 0.38).min(360.0))
+            .round()
+    } else {
+        let openai_shrink_t = ((960.0 - page.width) / 260.0).clamp(0.0, 1.0);
+        (400.0 - openai_shrink_t * 56.0)
+            .min(page.height * 0.43)
+            .round()
+    };
+    let claude_size = if is_compact {
+        220.0f32
+            .max((page.width * 0.30).min(page.height * 0.34).min(320.0))
+            .round()
+    } else {
+        276.0f32
+            .max((page.width * 0.355).min(page.height * 0.45).min(500.0))
+            .round()
+    };
 
     PageLayout {
         page,
         is_narrow,
+        is_compact,
         gutter,
         center_gap,
         column_width,
@@ -1000,8 +1073,16 @@ fn build_page_layout(page_rect: Rect, engine: &PretextEngine) -> PageLayout {
             height: openai_size,
         },
         claude_rect: GeoRect {
-            x: page.x + page.width - (claude_size * 0.69).round(),
-            y: page.y - (claude_size * 0.22).round(),
+            x: if is_compact {
+                page.x + page.width - gutter - (claude_size * 0.82).round()
+            } else {
+                page.x + page.width - (claude_size * 0.69).round()
+            },
+            y: if is_compact {
+                page.y + 6.0
+            } else {
+                page.y - (claude_size * 0.22).round()
+            },
             width: claude_size,
             height: claude_size,
         },
@@ -1447,7 +1528,7 @@ fn layout_dynamic_band(
     let Some(slot) = band.slot else {
         return CachedDynamicBand {
             input_cursor,
-            signature: band.signature.clone(),
+            signature: band.signature,
             line_count_before,
             line: None,
             output_cursor: input_cursor,
@@ -1464,7 +1545,7 @@ fn layout_dynamic_band(
     let Some(line) = line else {
         return CachedDynamicBand {
             input_cursor,
-            signature: band.signature.clone(),
+            signature: band.signature,
             line_count_before,
             line: None,
             output_cursor: input_cursor,
@@ -1474,7 +1555,7 @@ fn layout_dynamic_band(
     if next_cursor == input_cursor {
         return CachedDynamicBand {
             input_cursor,
-            signature: band.signature.clone(),
+            signature: band.signature,
             line_count_before,
             line: None,
             output_cursor: input_cursor,
@@ -1484,7 +1565,7 @@ fn layout_dynamic_band(
 
     CachedDynamicBand {
         input_cursor,
-        signature: band.signature.clone(),
+        signature: band.signature,
         line_count_before,
         line: Some(Arc::new(PositionedLine {
             x: slot.left.round(),
@@ -1564,7 +1645,7 @@ fn compute_incremental_dynamic_column(
             let next_band = if exhausted {
                 CachedDynamicBand {
                     input_cursor: cursor,
-                    signature: band_plan.signature.clone(),
+                    signature: band_plan.signature,
                     line_count_before: lines.len(),
                     line: None,
                     output_cursor: cursor,
@@ -2623,6 +2704,24 @@ mod tests {
     }
 
     #[test]
+    fn default_width_layout_uses_compact_mode() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let layout = build_page_layout(
+            Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 760.0)),
+            &engine,
+        );
+
+        assert!(!layout.is_narrow);
+        assert!(layout.is_compact);
+        assert!(layout.column_width >= 420.0);
+        assert!(layout.openai_rect.width < 380.0);
+        assert!(layout.claude_rect.width < 320.0);
+    }
+
+    #[test]
     fn projection_reuses_cached_headline_prepare_across_angle_updates() {
         let engine = PretextEngine::with_font_data_and_system_fonts(
             AssetRegistry::bundled_font_data(),
@@ -2980,5 +3079,16 @@ mod tests {
                 &fresh.projection.right_lines
             )
         );
+    }
+
+    #[test]
+    fn headline_paint_style_cache_reuses_arc_for_same_size() {
+        let mut demo = DynamicLayoutDemo::default();
+        let first = Arc::clone(demo.ensure_headline_paint_style(64.0));
+        let second = Arc::clone(demo.ensure_headline_paint_style(64.0));
+        let third = Arc::clone(demo.ensure_headline_paint_style(68.0));
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &third));
     }
 }

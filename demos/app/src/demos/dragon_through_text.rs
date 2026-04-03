@@ -127,7 +127,7 @@ impl DemoWindow for DragonThroughTextDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(2360.0, 1640.0))
+            .default_size(egui::vec2(1120.0, 1500.0))
             .show(ctx, |ui| {
                 ctx.request_repaint_after(FRAME_INTERVAL);
 

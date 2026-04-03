@@ -330,7 +330,7 @@ impl DemoWindow for JustificationAlgorithmsDemo {
     fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
         let mut open = self.open;
         egui::Window::new(self.title())
-            .default_size(egui::vec2(2920.0, 1960.0))
+            .default_size(egui::vec2(1240.0, 1820.0))
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
