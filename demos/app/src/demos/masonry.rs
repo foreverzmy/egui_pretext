@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{Color32, CornerRadius, Rect, Sense};
 use pretext::{
-    LayoutLine, LayoutLineGlyphRun, PrepareOptions, PreparedTextWithSegments, PretextEngine,
-    WhiteSpaceMode,
+    LayoutLineWithRuns, PrepareOptions, PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
 };
-use pretext_egui::AssetRegistry;
+use pretext_egui::{
+    paint_positioned_text_runs, AssetRegistry, PositionedTextRunRef, PretextFragmentPaintOptions,
+};
 
-use crate::demos::{text_runs::paint_glyph_runs, DemoWindow};
+use crate::demos::DemoWindow;
 
 const CARD_PADDING_X: f32 = 16.0;
 const CARD_PADDING_Y: f32 = 16.0;
@@ -69,8 +70,7 @@ struct MasonryCardState {
 
 struct MasonryRenderedCard {
     memo_key: u32,
-    lines: Vec<LayoutLine>,
-    glyph_runs: Vec<Vec<LayoutLineGlyphRun>>,
+    lines: Vec<LayoutLineWithRuns>,
 }
 
 struct MasonryLayoutState {
@@ -139,7 +139,7 @@ impl DemoWindow for MasonryDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(980.0, 640.0))
+            .default_size(egui::vec2(1960.0, 1280.0))
             .show(ctx, |ui| {
                 ui.painter()
                     .rect_filled(ui.max_rect(), CornerRadius::ZERO, PAGE_FILL);
@@ -383,16 +383,10 @@ impl MasonryDemo {
                 .prepared
                 .as_ref()
                 .expect("visible masonry cards should already be prepared");
-            let layout = engine.layout_with_lines(prepared, text_width.max(1.0), LINE_HEIGHT);
-            let glyph_runs = layout
-                .lines
-                .iter()
-                .map(|line| engine.line_glyph_runs(prepared, line))
-                .collect::<Vec<_>>();
+            let layout = engine.layout_with_runs(prepared, text_width.max(1.0), LINE_HEIGHT);
             card.rendered = Some(MasonryRenderedCard {
                 memo_key: render_key,
                 lines: layout.lines,
-                glyph_runs,
             });
         }
 
@@ -622,25 +616,33 @@ fn paint_masonry_card(
     painter.add(CARD_SHADOW.as_shape(rect, CornerRadius::same(CARD_RADIUS)));
     painter.rect_filled(rect, CornerRadius::same(CARD_RADIUS), CARD_FILL);
 
-    let mut y = rect.top() + CARD_PADDING_Y;
     let x = rect.left() + CARD_PADDING_X;
-
-    for (line, glyph_runs) in rendered.lines.iter().zip(rendered.glyph_runs.iter()) {
-        paint_glyph_runs(
-            painter,
-            x,
-            y,
-            &line.text,
-            glyph_runs,
-            masonry_text_style(),
-            LINE_HEIGHT,
-            INK,
-            ctx,
-            engine,
-            assets,
-        );
-        y += LINE_HEIGHT;
-    }
+    let style = masonry_text_style();
+    let options = PretextFragmentPaintOptions::new(style, LINE_HEIGHT)
+        .color(INK)
+        .fallback_font(egui::FontId::new(
+            style.size_px,
+            egui::FontFamily::Proportional,
+        ))
+        .fallback_align(egui::Align2::LEFT_TOP);
+    let _ = paint_positioned_text_runs(
+        painter,
+        rendered
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| PositionedTextRunRef {
+                x,
+                y: rect.top() + CARD_PADDING_Y + index as f32 * LINE_HEIGHT,
+                text: &line.line.text,
+                glyph_runs: &line.runs.glyph_runs,
+                emoji_overlays: &[],
+            }),
+        &options,
+        ctx,
+        engine,
+        assets,
+    );
 }
 
 #[cfg(test)]
@@ -787,8 +789,9 @@ mod tests {
 
         let stats = engine.runtime_stats();
         assert!(stats.layout_calls > 0);
-        assert!(stats.layout_with_lines_calls > 0);
-        assert!(stats.layout_with_lines_calls < masonry_dataset().texts.len() as u64);
+        assert!(stats.layout_with_runs_calls > 0);
+        assert!(stats.layout_with_runs_calls < masonry_dataset().texts.len() as u64);
+        assert_eq!(stats.line_glyph_runs_calls, 0);
     }
 
     #[test]
@@ -803,15 +806,17 @@ mod tests {
             demo.show(ctx, &engine, &mut assets);
         });
         let after_first = engine.runtime_stats();
+        let asset_after_first = assets.stats_snapshot();
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let after_second = engine.runtime_stats();
+        let asset_after_second = assets.stats_snapshot();
 
         assert_eq!(
-            after_second.layout_with_lines_calls,
-            after_first.layout_with_lines_calls
+            after_second.layout_with_runs_calls,
+            after_first.layout_with_runs_calls
         );
         assert_eq!(
             after_second.line_visual_runs_calls,
@@ -821,5 +826,14 @@ mod tests {
             after_second.line_glyph_runs_calls,
             after_first.line_glyph_runs_calls
         );
+        assert_eq!(
+            asset_after_second.atlas_entries,
+            asset_after_first.atlas_entries
+        );
+        assert_eq!(
+            asset_after_second.texture_uploads,
+            asset_after_first.texture_uploads
+        );
+        assert_eq!(asset_after_second.shaped_text_textures, 0);
     }
 }

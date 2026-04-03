@@ -1,19 +1,20 @@
 use eframe::egui;
 use egui::{
-    Align, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, StrokeKind, UiBuilder,
+    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense,
+    Stroke, StrokeKind, UiBuilder,
 };
 #[cfg(test)]
 use pretext::BidiDirection;
 use pretext::{
-    LayoutCursor, LayoutLineVisualRun, PrepareOptions, PreparedTextWithSegments, PretextEngine,
-    WhiteSpaceMode,
+    LayoutCursor, LayoutLineGlyphRun, LayoutLineVisualRun, PrepareOptions,
+    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
 };
 use pretext_egui::{
-    shaped_text_baseline_metrics, AssetRegistry, BaselineMetrics, BaselineMode, EmojiAssetId,
-    ShapedTextRasterRequest,
+    paint_styled_positioned_text_runs, split_builtin_emoji_glyphs, AssetRegistry, BaselineMode,
+    EmojiOverlayOptions, EmojiOverlayRun, PretextFragmentPaintOptions, ShapedTextRasterRequest,
+    StyledPositionedTextRunRef,
 };
 use std::sync::OnceLock;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::demos::DemoWindow;
 
@@ -142,7 +143,10 @@ struct TextInlineItem {
     chrome_width: f32,
     end_cursor: LayoutCursor,
     full_text: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     full_visual_runs: Vec<LayoutLineVisualRun>,
+    full_glyph_runs: Vec<LayoutLineGlyphRun>,
+    full_emoji_overlays: Vec<EmojiOverlayRun>,
     full_width: f32,
     leading_gap: f32,
     prepared: PreparedTextWithSegments,
@@ -153,7 +157,8 @@ struct ChipInlineItem {
     tone: ChipTone,
     leading_gap: f32,
     text: String,
-    visual_runs: Vec<LayoutLineVisualRun>,
+    glyph_runs: Vec<LayoutLineGlyphRun>,
+    emoji_overlays: Vec<EmojiOverlayRun>,
     text_width: f32,
     chrome_width: f32,
     prepared: PreparedTextWithSegments,
@@ -172,7 +177,8 @@ struct LineFragment {
     kind: FragmentKind,
     leading_gap: f32,
     text: String,
-    visual_runs: Vec<LayoutLineVisualRun>,
+    glyph_runs: Vec<LayoutLineGlyphRun>,
+    emoji_overlays: Vec<EmojiOverlayRun>,
     text_width: f32,
     chrome_width: f32,
 }
@@ -309,7 +315,7 @@ impl DemoWindow for RichNoteDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(980.0, 720.0))
+            .default_size(egui::vec2(1960.0, 1440.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -708,6 +714,21 @@ fn measure_collapsed_space_width(engine: &PretextEngine, style: &pretext::TextSt
         .max(0.0)
 }
 
+fn fragment_overlay_options(
+    style: &pretext::TextStyleSpec,
+    metrics: FragmentPaintMetrics,
+) -> EmojiOverlayOptions<'_> {
+    EmojiOverlayOptions {
+        style,
+        slot_height: metrics.slot_height,
+        padding_x: SHAPED_TEXT_PAD_X,
+        padding_y: SHAPED_TEXT_PAD_Y,
+        slack_x: 2.0,
+        slack_y: 4.0,
+        baseline_mode: BaselineMode::AutoFontMetrics,
+    }
+}
+
 fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec<InlineItem> {
     let inline_boundary_gap =
         measure_collapsed_space_width(engine, text_style_model(TextStyleName::Body).spec);
@@ -721,17 +742,23 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
                     engine.prepare_with_segments(label, chip_text_style(), &normal_options());
                 let mut label_cursor = LINE_START_CURSOR;
                 let label_line = engine
-                    .layout_next_line(&label_prepared, &mut label_cursor, UNBOUNDED_WIDTH)
+                    .layout_next_line_with_runs(&label_prepared, &mut label_cursor, UNBOUNDED_WIDTH)
                     .expect("chip label should fit in an unbounded line");
-                let visual_runs = engine.line_visual_runs(&label_prepared, &label_line);
-                let text_width = label_line.width.ceil();
+                let (glyph_runs, emoji_overlays) = split_builtin_emoji_glyphs(
+                    &label_line.runs.visual_runs,
+                    &label_line.runs.glyph_runs,
+                    fragment_overlay_options(chip_text_style(), chip_fragment_metrics(0.0)),
+                    engine,
+                );
+                let text_width = label_line.line.width.ceil();
                 let prepared = engine
                     .prepare_atomic_placeholder(text_width + CHIP_CHROME_WIDTH, &normal_options());
                 items.push(InlineItem::Chip(ChipInlineItem {
                     tone,
                     leading_gap: pending_gap,
                     text: label.to_owned(),
-                    visual_runs,
+                    glyph_runs,
+                    emoji_overlays,
                     text_width,
                     chrome_width: CHIP_CHROME_WIDTH,
                     prepared,
@@ -758,19 +785,29 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
                     engine.prepare_with_segments(trimmed_text, style_model.spec, &normal_options());
                 let mut cursor = LINE_START_CURSOR;
                 let Some(whole_line) =
-                    engine.layout_next_line(&prepared, &mut cursor, UNBOUNDED_WIDTH)
+                    engine.layout_next_line_with_runs(&prepared, &mut cursor, UNBOUNDED_WIDTH)
                 else {
                     continue;
                 };
-                let full_visual_runs = engine.line_visual_runs(&prepared, &whole_line);
+                let (full_glyph_runs, full_emoji_overlays) = split_builtin_emoji_glyphs(
+                    &whole_line.runs.visual_runs,
+                    &whole_line.runs.glyph_runs,
+                    fragment_overlay_options(
+                        style_model.spec,
+                        fragment_metrics_for_style(style_model.style_name, 0.0),
+                    ),
+                    engine,
+                );
 
                 items.push(InlineItem::Text(TextInlineItem {
                     style_name: style_model.style_name,
                     chrome_width: style_model.chrome_width,
-                    end_cursor: whole_line.end,
-                    full_text: whole_line.text,
-                    full_visual_runs,
-                    full_width: whole_line.width,
+                    end_cursor: whole_line.line.end,
+                    full_text: whole_line.line.text,
+                    full_visual_runs: whole_line.runs.visual_runs,
+                    full_glyph_runs,
+                    full_emoji_overlays,
+                    full_width: whole_line.line.width,
                     leading_gap: if carry_gap > 0.0 || has_leading_whitespace {
                         inline_boundary_gap
                     } else {
@@ -827,7 +864,8 @@ fn layout_inline_items(
                         kind: FragmentKind::Chip(item.tone),
                         leading_gap,
                         text: item.text.clone(),
-                        visual_runs: item.visual_runs.clone(),
+                        glyph_runs: item.glyph_runs.clone(),
+                        emoji_overlays: item.emoji_overlays.clone(),
                         text_width: item.text_width,
                         chrome_width: item.chrome_width,
                     });
@@ -860,7 +898,8 @@ fn layout_inline_items(
                                 kind: fragment_kind_for_style(item.style_name),
                                 leading_gap,
                                 text: item.full_text.clone(),
-                                visual_runs: item.full_visual_runs.clone(),
+                                glyph_runs: item.full_glyph_runs.clone(),
+                                emoji_overlays: item.full_emoji_overlays.clone(),
                                 text_width: item.full_width,
                                 chrome_width: item.chrome_width,
                             });
@@ -873,7 +912,7 @@ fn layout_inline_items(
 
                     let start_cursor = text_cursor.unwrap_or(LINE_START_CURSOR);
                     let mut line_cursor = start_cursor;
-                    let Some(line) = engine.layout_next_line(
+                    let Some(line) = engine.layout_next_line_with_runs(
                         &item.prepared,
                         &mut line_cursor,
                         (remaining_width - reserved_width).max(1.0),
@@ -883,29 +922,38 @@ fn layout_inline_items(
                         continue;
                     };
 
-                    if start_cursor == line.end {
+                    if start_cursor == line.line.end {
                         item_index += 1;
                         text_cursor = None;
                         continue;
                     }
-                    let visual_runs = engine.line_visual_runs(&item.prepared, &line);
+                    let (glyph_runs, emoji_overlays) = split_builtin_emoji_glyphs(
+                        &line.runs.visual_runs,
+                        &line.runs.glyph_runs,
+                        fragment_overlay_options(
+                            text_style_model(item.style_name).spec,
+                            fragment_metrics_for_style(item.style_name, 0.0),
+                        ),
+                        engine,
+                    );
 
                     fragments.push(LineFragment {
                         kind: fragment_kind_for_style(item.style_name),
                         leading_gap,
-                        text: line.text,
-                        visual_runs,
-                        text_width: line.width,
+                        text: line.line.text,
+                        glyph_runs,
+                        emoji_overlays,
+                        text_width: line.line.width,
                         chrome_width: item.chrome_width,
                     });
-                    line_width += leading_gap + line.width + item.chrome_width;
+                    line_width += leading_gap + line.line.width + item.chrome_width;
                     remaining_width = (safe_width - line_width).max(0.0);
 
-                    if line.end == item.end_cursor {
+                    if line.line.end == item.end_cursor {
                         item_index += 1;
                         text_cursor = None;
                     } else {
-                        text_cursor = Some(line.end);
+                        text_cursor = Some(line.line.end);
                         break;
                     }
                 }
@@ -929,6 +977,13 @@ fn fragment_kind_for_style(style_name: TextStyleName) -> FragmentKind {
     }
 }
 
+fn fragment_metrics_for_style(style_name: TextStyleName, line_top: f32) -> FragmentPaintMetrics {
+    match style_name {
+        TextStyleName::Body | TextStyleName::Link => body_fragment_metrics(line_top),
+        TextStyleName::Code => code_fragment_metrics(line_top),
+    }
+}
+
 fn paint_rich_note_body(
     painter: &egui::Painter,
     rect: Rect,
@@ -939,6 +994,7 @@ fn paint_rich_note_body(
 ) {
     let body_left = rect.left();
     let body_top = rect.top();
+    let mut text_runs = Vec::new();
 
     for (line_index, line) in lines.iter().enumerate() {
         let mut x = body_left;
@@ -950,31 +1006,27 @@ fn paint_rich_note_body(
             match fragment.kind {
                 FragmentKind::Body => {
                     let metrics = body_fragment_metrics(y);
-                    paint_fragment_runs(
-                        painter,
+                    text_runs.push(rich_note_text_run(
                         x,
                         fragment,
                         metrics,
+                        fragment_font_family(fragment.kind),
                         text_style_model(TextStyleName::Body).spec,
                         INK,
-                        ctx,
-                        engine,
-                        assets,
-                    );
+                        BODY_TEXT_SIZE,
+                    ));
                 }
                 FragmentKind::Link => {
                     let metrics = body_fragment_metrics(y);
-                    paint_fragment_runs(
-                        painter,
+                    text_runs.push(rich_note_text_run(
                         x,
                         fragment,
                         metrics,
+                        fragment_font_family(fragment.kind),
                         text_style_model(TextStyleName::Link).spec,
                         ACCENT,
-                        ctx,
-                        engine,
-                        assets,
-                    );
+                        LINK_TEXT_SIZE,
+                    ));
                     painter.line_segment(
                         [
                             egui::pos2(x, y + LINK_UNDERLINE_Y),
@@ -990,17 +1042,15 @@ fn paint_rich_note_body(
                     );
                     painter.rect_filled(box_rect, CornerRadius::same(9), CODE_FILL);
                     let metrics = code_fragment_metrics(y);
-                    paint_fragment_runs(
-                        painter,
+                    text_runs.push(rich_note_text_run(
                         x + fragment.chrome_width * 0.5,
                         fragment,
                         metrics,
+                        fragment_font_family(fragment.kind),
                         text_style_model(TextStyleName::Code).spec,
                         INK,
-                        ctx,
-                        engine,
-                        assets,
-                    );
+                        CODE_TEXT_SIZE,
+                    ));
                 }
                 FragmentKind::Chip(tone) => {
                     let (fill, stroke, text_color) = chip_palette(tone);
@@ -1016,23 +1066,23 @@ fn paint_rich_note_body(
                         StrokeKind::Inside,
                     );
                     let metrics = chip_fragment_metrics(y);
-                    paint_fragment_runs(
-                        painter,
+                    text_runs.push(rich_note_text_run(
                         x + fragment.chrome_width * 0.5,
                         fragment,
                         metrics,
+                        fragment_font_family(fragment.kind),
                         chip_text_style(),
                         text_color,
-                        ctx,
-                        engine,
-                        assets,
-                    );
+                        CHIP_TEXT_SIZE,
+                    ));
                 }
             }
 
             x += fragment.total_width();
         }
     }
+
+    let _ = paint_styled_positioned_text_runs(painter, text_runs, ctx, engine, assets);
 }
 
 fn body_fragment_metrics(line_top: f32) -> FragmentPaintMetrics {
@@ -1088,209 +1138,38 @@ fn chip_palette(tone: ChipTone) -> (Color32, Color32, Color32) {
     }
 }
 
-fn paint_fragment_runs(
-    painter: &egui::Painter,
+fn fragment_font_family(kind: FragmentKind) -> FontFamily {
+    match kind {
+        FragmentKind::Code => FontFamily::Monospace,
+        FragmentKind::Body | FragmentKind::Link | FragmentKind::Chip(_) => FontFamily::Proportional,
+    }
+}
+
+fn rich_note_text_run<'a>(
     x: f32,
-    fragment: &LineFragment,
+    fragment: &'a LineFragment,
     metrics: FragmentPaintMetrics,
-    style: &pretext::TextStyleSpec,
+    fallback_family: FontFamily,
+    style: &'static pretext::TextStyleSpec,
     color: Color32,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-) {
-    if fragment.visual_runs.is_empty() {
-        let fallback_run = LayoutLineVisualRun {
-            text: fragment.text.clone(),
-            width: fragment.text_width,
-            start: LINE_START_CURSOR,
-            end: LINE_START_CURSOR,
-            level: 0,
-            direction: pretext::BidiDirection::Ltr,
-        };
-        paint_run_with_fallbacks(
-            painter,
-            x,
-            &fallback_run,
-            style,
-            color,
-            metrics,
-            ctx,
-            engine,
-            assets,
-        );
-        return;
-    }
-
-    let mut offset = 0.0f32;
-    for run in &fragment.visual_runs {
-        if run.text.is_empty() {
-            continue;
-        }
-
-        let run_left = x + offset;
-        paint_run_with_fallbacks(
-            painter, run_left, run, style, color, metrics, ctx, engine, assets,
-        );
-        offset += run.width;
+    emoji_size: f32,
+) -> StyledPositionedTextRunRef<'a, 'static> {
+    StyledPositionedTextRunRef {
+        x,
+        y: metrics.slot_top,
+        text: &fragment.text,
+        glyph_runs: &fragment.glyph_runs,
+        emoji_overlays: &fragment.emoji_overlays,
+        options: PretextFragmentPaintOptions::new(style, metrics.slot_height)
+            .color(color)
+            .fallback_font(FontId::new(style.size_px, fallback_family))
+            .fallback_align(Align2::LEFT_TOP)
+            .emoji_size(emoji_size)
+            .emoji_slot_height(metrics.slot_height),
     }
 }
 
-fn paint_run_with_fallbacks(
-    painter: &egui::Painter,
-    run_left: f32,
-    run: &LayoutLineVisualRun,
-    style: &pretext::TextStyleSpec,
-    color: Color32,
-    metrics: FragmentPaintMetrics,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-) {
-    if !contains_supported_emoji(&run.text) {
-        paint_shaped_text_fragment(
-            painter,
-            run_left,
-            run,
-            0.0,
-            run.width,
-            &run.text,
-            style,
-            color,
-            metrics,
-            ctx,
-            engine,
-            assets,
-            BaselineMode::AutoFontMetrics,
-        );
-        return;
-    }
-
-    let baseline_metrics = rich_run_baseline_metrics(run, style, metrics, color, engine);
-    let baseline_mode = BaselineMode::FixedBaselinePx(baseline_metrics.baseline_px);
-    let graphemes = run.text.grapheme_indices(true).collect::<Vec<_>>();
-    let prefix_widths = engine.prefix_widths(&run.text, style);
-    let mut fragment_start = 0usize;
-
-    for (index, (byte_start, grapheme)) in graphemes.iter().enumerate() {
-        let Some(emoji_id) = AssetRegistry::builtin_emoji_for_grapheme(grapheme) else {
-            continue;
-        };
-
-        if fragment_start < index {
-            let text_start = graphemes[fragment_start].0;
-            let text = &run.text[text_start..*byte_start];
-            let fragment_offset = prefix_widths[fragment_start];
-            let fragment_width = fragment_width(&prefix_widths, fragment_start, index);
-            paint_shaped_text_fragment(
-                painter,
-                run_left,
-                run,
-                fragment_offset,
-                fragment_width,
-                text,
-                style,
-                color,
-                metrics,
-                ctx,
-                engine,
-                assets,
-                baseline_mode,
-            );
-        }
-
-        let emoji_start = prefix_widths[index];
-        let emoji_end = prefix_widths[index + 1];
-        paint_emoji_fragment(
-            painter,
-            run_left,
-            run,
-            emoji_start,
-            emoji_end,
-            emoji_id,
-            style.size_px,
-            metrics,
-            ctx,
-            assets,
-            baseline_metrics,
-        );
-
-        fragment_start = index + 1;
-    }
-
-    if fragment_start < graphemes.len() {
-        let text_start = graphemes[fragment_start].0;
-        let text = &run.text[text_start..];
-        let fragment_offset = prefix_widths[fragment_start];
-        let trailing_width = prefix_widths.last().copied().unwrap_or(run.width) - fragment_offset;
-        paint_shaped_text_fragment(
-            painter,
-            run_left,
-            run,
-            fragment_offset,
-            trailing_width,
-            text,
-            style,
-            color,
-            metrics,
-            ctx,
-            engine,
-            assets,
-            baseline_mode,
-        );
-    }
-}
-
-fn fragment_width(prefix_widths: &[f32], start: usize, end: usize) -> f32 {
-    prefix_widths
-        .get(end)
-        .copied()
-        .unwrap_or_else(|| prefix_widths.last().copied().unwrap_or(0.0))
-        - prefix_widths.get(start).copied().unwrap_or(0.0)
-}
-
-fn paint_shaped_text_fragment(
-    painter: &egui::Painter,
-    run_left: f32,
-    run: &LayoutLineVisualRun,
-    fragment_offset: f32,
-    fragment_width: f32,
-    text: &str,
-    style: &pretext::TextStyleSpec,
-    color: Color32,
-    metrics: FragmentPaintMetrics,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-    baseline_mode: BaselineMode,
-) {
-    let request = rich_shaped_text_request(
-        text,
-        style,
-        run.direction,
-        color,
-        fragment_width,
-        metrics,
-        baseline_mode,
-    );
-    let Some(texture) = assets.shaped_text_texture(engine, request, ctx) else {
-        return;
-    };
-    let slot_left = fragment_slot_left(run_left, run, fragment_offset, fragment_width);
-    let pixels_per_point = ctx.pixels_per_point().max(1.0);
-    let rect_min = egui::pos2(
-        ((slot_left - SHAPED_TEXT_PAD_X) * pixels_per_point).round() / pixels_per_point,
-        ((metrics.slot_top - SHAPED_TEXT_PAD_Y) * pixels_per_point).round() / pixels_per_point,
-    );
-    let rect = Rect::from_min_size(rect_min, texture.logical_size);
-    painter.image(
-        texture.handle.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        color,
-    );
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 fn rich_shaped_text_request<'a>(
     text: &'a str,
     style: &'a pretext::TextStyleSpec,
@@ -1314,81 +1193,6 @@ fn rich_shaped_text_request<'a>(
         baseline_mode,
         texture_options: egui::TextureOptions::NEAREST,
     }
-}
-
-fn fragment_slot_left(
-    run_left: f32,
-    run: &LayoutLineVisualRun,
-    fragment_offset: f32,
-    fragment_width: f32,
-) -> f32 {
-    match run.direction {
-        pretext::BidiDirection::Ltr => run_left + fragment_offset,
-        pretext::BidiDirection::Rtl => run_left + run.width - fragment_offset - fragment_width,
-    }
-}
-
-fn paint_emoji_fragment(
-    painter: &egui::Painter,
-    run_left: f32,
-    run: &LayoutLineVisualRun,
-    fragment_start: f32,
-    fragment_end: f32,
-    emoji_id: EmojiAssetId,
-    emoji_size: f32,
-    metrics: FragmentPaintMetrics,
-    ctx: &egui::Context,
-    assets: &mut AssetRegistry,
-    baseline_metrics: BaselineMetrics,
-) {
-    let slot_left = fragment_slot_left(
-        run_left,
-        run,
-        fragment_start,
-        (fragment_end - fragment_start).max(1.0),
-    );
-    let slot_width = (fragment_end - fragment_start).max(1.0);
-    let size = emoji_size.min(metrics.slot_height).min(slot_width).max(1.0);
-    let rect = Rect::from_min_size(
-        egui::pos2(
-            slot_left + (slot_width - size).max(0.0) * 0.5,
-            metrics.slot_top + baseline_metrics.square_top(size),
-        ),
-        egui::vec2(size, size),
-    );
-    let texture = assets.emoji_texture(emoji_id, [96, 96], ctx);
-    painter.image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-fn rich_run_baseline_metrics(
-    run: &LayoutLineVisualRun,
-    style: &pretext::TextStyleSpec,
-    metrics: FragmentPaintMetrics,
-    color: Color32,
-    engine: &PretextEngine,
-) -> BaselineMetrics {
-    shaped_text_baseline_metrics(
-        engine,
-        rich_shaped_text_request(
-            &run.text,
-            style,
-            run.direction,
-            color,
-            run.width,
-            metrics,
-            BaselineMode::AutoFontMetrics,
-        ),
-    )
-}
-
-fn contains_supported_emoji(text: &str) -> bool {
-    text.graphemes(true)
-        .any(|grapheme| AssetRegistry::builtin_emoji_for_grapheme(grapheme).is_some())
 }
 
 #[cfg(test)]
@@ -1533,11 +1337,14 @@ mod tests {
         let output = ctx.run(raw_input(1.0), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
+        let stats = assets.stats_snapshot();
 
         assert!(output
             .shapes
             .iter()
             .any(|clipped| { shape_uses_user_texture(&clipped.shape) }));
+        assert!(stats.atlas_entries > 0);
+        assert_eq!(stats.shaped_text_textures, 0);
     }
 
     #[test]

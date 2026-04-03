@@ -103,6 +103,18 @@ pub struct LayoutLineGlyphRun {
     pub glyphs: Vec<LayoutGlyph>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutLineWithGlyphRuns {
+    pub line: LayoutLine,
+    pub glyph_runs: Vec<LayoutLineGlyphRun>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutLineRuns {
+    pub visual_runs: Vec<LayoutLineVisualRun>,
+    pub glyph_runs: Vec<LayoutLineGlyphRun>,
+}
+
 #[derive(Clone)]
 pub struct ShapedTextSpan {
     pub text: String,
@@ -133,6 +145,19 @@ pub struct LayoutWithLinesResult {
     pub lines: Vec<LayoutLine>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutLineWithRuns {
+    pub line: LayoutLine,
+    pub runs: LayoutLineRuns,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutWithRunsResult {
+    pub height: f32,
+    pub line_count: usize,
+    pub lines: Vec<LayoutLineWithRuns>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EngineRuntimeStats {
     pub prepare_calls: u64,
@@ -144,10 +169,14 @@ pub struct EngineRuntimeStats {
     pub atomic_placeholder_cache_misses: u64,
     pub layout_calls: u64,
     pub layout_with_lines_calls: u64,
+    pub layout_with_runs_calls: u64,
     pub walk_line_ranges_calls: u64,
     pub layout_next_line_calls: u64,
+    pub layout_next_line_with_glyph_runs_calls: u64,
+    pub layout_next_line_with_runs_calls: u64,
     pub line_visual_runs_calls: u64,
     pub line_glyph_runs_calls: u64,
+    pub line_runs_calls: u64,
     pub glyph_advance_calls: u64,
     pub prefix_widths_calls: u64,
     pub shape_text_spans_calls: u64,
@@ -222,10 +251,14 @@ struct RuntimeStats {
     atomic_placeholder_cache_misses: AtomicU64,
     layout_calls: AtomicU64,
     layout_with_lines_calls: AtomicU64,
+    layout_with_runs_calls: AtomicU64,
     walk_line_ranges_calls: AtomicU64,
     layout_next_line_calls: AtomicU64,
+    layout_next_line_with_glyph_runs_calls: AtomicU64,
+    layout_next_line_with_runs_calls: AtomicU64,
     line_visual_runs_calls: AtomicU64,
     line_glyph_runs_calls: AtomicU64,
+    line_runs_calls: AtomicU64,
     glyph_advance_calls: AtomicU64,
     prefix_widths_calls: AtomicU64,
     shape_text_spans_calls: AtomicU64,
@@ -535,6 +568,18 @@ impl PretextEngine {
         layout::layout_with_lines(prepared, max_width, line_height, self.para_cache.as_ref())
     }
 
+    pub fn layout_with_runs(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        max_width: f32,
+        line_height: f32,
+    ) -> LayoutWithRunsResult {
+        self.runtime_stats
+            .layout_with_runs_calls
+            .fetch_add(1, Ordering::Relaxed);
+        layout::layout_with_runs(prepared, max_width, line_height, self.para_cache.as_ref())
+    }
+
     pub fn walk_line_ranges(
         &self,
         prepared: &PreparedTextWithSegments,
@@ -559,6 +604,35 @@ impl PretextEngine {
         layout::layout_next_line(prepared, start, max_width, self.para_cache.as_ref())
     }
 
+    pub fn layout_next_line_with_glyph_runs(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        start: &mut LayoutCursor,
+        max_width: f32,
+    ) -> Option<LayoutLineWithGlyphRuns> {
+        self.runtime_stats
+            .layout_next_line_with_glyph_runs_calls
+            .fetch_add(1, Ordering::Relaxed);
+        layout::layout_next_line_with_glyph_runs(
+            prepared,
+            start,
+            max_width,
+            self.para_cache.as_ref(),
+        )
+    }
+
+    pub fn layout_next_line_with_runs(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        start: &mut LayoutCursor,
+        max_width: f32,
+    ) -> Option<LayoutLineWithRuns> {
+        self.runtime_stats
+            .layout_next_line_with_runs_calls
+            .fetch_add(1, Ordering::Relaxed);
+        layout::layout_next_line_with_runs(prepared, start, max_width, self.para_cache.as_ref())
+    }
+
     pub fn line_visual_runs(
         &self,
         prepared: &PreparedTextWithSegments,
@@ -579,6 +653,17 @@ impl PretextEngine {
             .line_glyph_runs_calls
             .fetch_add(1, Ordering::Relaxed);
         layout::line_glyph_runs(prepared.inner(), line)
+    }
+
+    pub fn line_runs(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        line: &LayoutLine,
+    ) -> LayoutLineRuns {
+        self.runtime_stats
+            .line_runs_calls
+            .fetch_add(1, Ordering::Relaxed);
+        layout::line_runs(prepared.inner(), line)
     }
 
     pub fn clear_cache(&mut self) {
@@ -747,10 +832,18 @@ impl RuntimeStats {
                 .load(Ordering::Relaxed),
             layout_calls: self.layout_calls.load(Ordering::Relaxed),
             layout_with_lines_calls: self.layout_with_lines_calls.load(Ordering::Relaxed),
+            layout_with_runs_calls: self.layout_with_runs_calls.load(Ordering::Relaxed),
             walk_line_ranges_calls: self.walk_line_ranges_calls.load(Ordering::Relaxed),
             layout_next_line_calls: self.layout_next_line_calls.load(Ordering::Relaxed),
+            layout_next_line_with_glyph_runs_calls: self
+                .layout_next_line_with_glyph_runs_calls
+                .load(Ordering::Relaxed),
+            layout_next_line_with_runs_calls: self
+                .layout_next_line_with_runs_calls
+                .load(Ordering::Relaxed),
             line_visual_runs_calls: self.line_visual_runs_calls.load(Ordering::Relaxed),
             line_glyph_runs_calls: self.line_glyph_runs_calls.load(Ordering::Relaxed),
+            line_runs_calls: self.line_runs_calls.load(Ordering::Relaxed),
             glyph_advance_calls: self.glyph_advance_calls.load(Ordering::Relaxed),
             prefix_widths_calls: self.prefix_widths_calls.load(Ordering::Relaxed),
             shape_text_spans_calls: self.shape_text_spans_calls.load(Ordering::Relaxed),
@@ -777,6 +870,7 @@ fn next_engine_revision() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering as CmpOrdering;
 
     fn bundled_engine() -> PretextEngine {
         PretextEngine::with_font_data_and_system_fonts(
@@ -806,6 +900,141 @@ mod tests {
             weight: 400,
             italic: false,
         }
+    }
+
+    fn total_width(engine: &PretextEngine, text: &str, style: &TextStyleSpec) -> f32 {
+        engine
+            .prefix_widths(text, style)
+            .last()
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn advance_cursor_for_test(
+        prepared: &PreparedTextWithSegments,
+        cursor: LayoutCursor,
+    ) -> LayoutCursor {
+        if let Some(segment) = prepared.inner().seg_meta().get(cursor.segment_index) {
+            if cursor.grapheme_index + 1 < segment.graphemes.len() {
+                return LayoutCursor {
+                    segment_index: cursor.segment_index,
+                    grapheme_index: cursor.grapheme_index + 1,
+                };
+            }
+        }
+
+        LayoutCursor {
+            segment_index: cursor.segment_index + 1,
+            grapheme_index: 0,
+        }
+    }
+
+    fn terminal_cursor(prepared: &PreparedTextWithSegments) -> LayoutCursor {
+        LayoutCursor {
+            segment_index: prepared.inner().seg_meta().len(),
+            grapheme_index: 0,
+        }
+    }
+
+    fn slice_prepared_source(
+        prepared: &PreparedTextWithSegments,
+        start: LayoutCursor,
+        end: LayoutCursor,
+    ) -> String {
+        let mut text = String::new();
+        let mut cursor = start;
+
+        while cursor != end {
+            let Some(segment) = prepared.inner().seg_meta().get(cursor.segment_index) else {
+                break;
+            };
+            let Some(grapheme) = segment.graphemes.get(cursor.grapheme_index) else {
+                cursor = LayoutCursor {
+                    segment_index: cursor.segment_index + 1,
+                    grapheme_index: 0,
+                };
+                continue;
+            };
+
+            text.push_str(crate::analysis::slice_text(
+                prepared.inner().text(),
+                &grapheme.byte_range,
+            ));
+            cursor = advance_cursor_for_test(prepared, cursor);
+        }
+
+        text
+    }
+
+    fn reconstruct_from_line_boundaries(
+        prepared: &PreparedTextWithSegments,
+        lines: &[LayoutLine],
+    ) -> String {
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(&slice_prepared_source(prepared, line.start, line.end));
+        }
+        text
+    }
+
+    fn reconstruct_from_walked_ranges(
+        engine: &PretextEngine,
+        prepared: &PreparedTextWithSegments,
+        width: f32,
+    ) -> String {
+        let mut text = String::new();
+        engine.walk_line_ranges(prepared, width, |line| {
+            text.push_str(&slice_prepared_source(prepared, line.start, line.end));
+        });
+        text
+    }
+
+    fn collect_streamed_lines(
+        engine: &PretextEngine,
+        prepared: &PreparedTextWithSegments,
+        width: f32,
+        start: LayoutCursor,
+    ) -> Vec<LayoutLine> {
+        let mut lines = Vec::new();
+        let mut cursor = start;
+
+        while let Some(line) = engine.layout_next_line(prepared, &mut cursor, width) {
+            lines.push(line);
+        }
+
+        lines
+    }
+
+    fn collect_streamed_lines_with_widths(
+        engine: &PretextEngine,
+        prepared: &PreparedTextWithSegments,
+        widths: &[f32],
+        start: LayoutCursor,
+    ) -> Vec<LayoutLine> {
+        let mut lines = Vec::new();
+        let mut cursor = start;
+        let terminal = terminal_cursor(prepared);
+        let mut width_index = 0usize;
+
+        while cursor != terminal {
+            let width = *widths.get(width_index).unwrap_or_else(|| {
+                panic!("collect_streamed_lines_with_widths needs more widths to finish paragraph")
+            });
+            width_index += 1;
+
+            let Some(line) = engine.layout_next_line(prepared, &mut cursor, width) else {
+                panic!("layout_next_line returned None before reaching terminal cursor");
+            };
+            lines.push(line);
+        }
+
+        lines
+    }
+
+    fn cursor_cmp(a: LayoutCursor, b: LayoutCursor) -> CmpOrdering {
+        a.segment_index
+            .cmp(&b.segment_index)
+            .then(a.grapheme_index.cmp(&b.grapheme_index))
     }
 
     #[test]
@@ -1114,6 +1343,264 @@ mod tests {
         assert!(
             spans[0].glyphs.first().unwrap().cluster_byte
                 > spans[0].glyphs.last().unwrap().cluster_byte
+        );
+    }
+
+    #[test]
+    fn adjacent_cjk_text_units_stay_breakable_after_visible_text() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared =
+            engine.prepare_with_segments("foo 世界 bar", &style, &PrepareOptions::default());
+        let width = total_width(&engine, "foo 世", &style) + 0.1;
+
+        let batched = engine.layout_with_lines(&prepared, width, 22.0);
+        let streamed = collect_streamed_lines(&engine, &prepared, width, LayoutCursor::default());
+
+        assert_eq!(
+            batched.lines.first().map(|line| line.text.as_str()),
+            Some("foo 世")
+        );
+        assert!(batched
+            .lines
+            .get(1)
+            .is_some_and(|line| line.text.starts_with('界')));
+        assert_eq!(
+            reconstruct_from_line_boundaries(&prepared, &batched.lines),
+            prepared.inner().text()
+        );
+        assert_eq!(streamed, batched.lines);
+    }
+
+    #[test]
+    fn mixed_script_streaming_stays_aligned_with_batched_layout() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "Hello 世界 مرحبا 🌍 test",
+            &style,
+            &PrepareOptions::default(),
+        );
+        let width = 80.0;
+        let batched = engine.layout_with_lines(&prepared, width, 22.0);
+        let streamed = collect_streamed_lines(&engine, &prepared, width, LayoutCursor::default());
+
+        assert!(batched.lines.len() >= 3);
+        assert_eq!(streamed, batched.lines);
+    }
+
+    #[test]
+    fn layout_and_layout_with_lines_stay_aligned_when_zwsp_triggers_narrow_breaking() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+
+        for text in ["alpha\u{200B}beta", "alpha\u{200B}beta\u{200C}gamma"] {
+            let plain = engine.prepare(text, &style, &PrepareOptions::default());
+            let rich = engine.prepare_with_segments(text, &style, &PrepareOptions::default());
+
+            assert_eq!(
+                engine.layout(&plain, 10.0, 22.0).line_count,
+                engine.layout_with_lines(&rich, 10.0, 22.0).line_count
+            );
+        }
+    }
+
+    #[test]
+    fn layout_with_lines_matches_streaming_after_zwsp_break_trims_leading_space() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "生活就像海洋\u{200B} 只有意志坚定的人才能到达彼岸",
+            &style,
+            &PrepareOptions::default(),
+        );
+        let width = (total_width(&engine, "生活就像海洋", &style) - 1.0).max(1.0);
+
+        let batched = engine.layout_with_lines(&prepared, width, 22.0);
+        let streamed = collect_streamed_lines(&engine, &prepared, width, LayoutCursor::default());
+
+        assert!(batched.lines.len() >= 2);
+        assert!(!batched.lines[1].text.starts_with(' '));
+        assert_eq!(streamed, batched.lines);
+    }
+
+    #[test]
+    fn layout_next_line_can_resume_from_any_fixed_width_line_start_without_hidden_state() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "foo trans\u{00AD}atlantic said \"hello\" to 世界 and waved. alpha\u{200B}beta 🚀",
+            &style,
+            &PrepareOptions::default(),
+        );
+        let width = 90.0;
+        let expected = engine.layout_with_lines(&prepared, width, 22.0);
+
+        assert!(expected.lines.len() > 2);
+
+        for index in 0..expected.lines.len() {
+            let suffix =
+                collect_streamed_lines(&engine, &prepared, width, expected.lines[index].start);
+            assert_eq!(suffix, expected.lines[index..].to_vec());
+        }
+
+        let mut cursor = terminal_cursor(&prepared);
+        assert!(engine
+            .layout_next_line(&prepared, &mut cursor, width)
+            .is_none());
+    }
+
+    #[test]
+    fn rich_line_boundary_cursors_reconstruct_normalized_source_text_exactly() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let widths = [40.0, 80.0, 120.0, 200.0];
+
+        for text in [
+            "a b c",
+            "  Hello\t \n  World  ",
+            "foo trans\u{00AD}atlantic said \"hello\" to 世界 and waved.",
+            "According to محمد الأحمد, the results improved.",
+            "see https://example.com/reports/q3?lang=ar&mode=full now",
+            "alpha\u{200B}beta gamma",
+        ] {
+            let prepared = engine.prepare_with_segments(text, &style, &PrepareOptions::default());
+            let expected = prepared.inner().text().to_owned();
+
+            for width in widths {
+                let batched = engine.layout_with_lines(&prepared, width, 22.0);
+                let streamed =
+                    collect_streamed_lines(&engine, &prepared, width, LayoutCursor::default());
+
+                assert_eq!(
+                    reconstruct_from_line_boundaries(&prepared, &batched.lines),
+                    expected
+                );
+                assert_eq!(
+                    reconstruct_from_line_boundaries(&prepared, &streamed),
+                    expected
+                );
+                assert_eq!(
+                    reconstruct_from_walked_ranges(&engine, &prepared, width),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn soft_hyphen_round_trip_uses_source_slices_instead_of_rendered_line_text() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "foo trans\u{00AD}atlantic",
+            &style,
+            &PrepareOptions::default(),
+        );
+        let width =
+            total_width(&engine, "foo trans", &style) + engine.glyph_advance('-', &style) + 0.1;
+        let result = engine.layout_with_lines(&prepared, width, 22.0);
+
+        assert!(result
+            .lines
+            .first()
+            .is_some_and(|line| line.text.ends_with('-')));
+        assert_eq!(
+            result
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<String>(),
+            "foo trans-atlantic"
+        );
+        assert_eq!(
+            reconstruct_from_line_boundaries(&prepared, &result.lines),
+            prepared.inner().text()
+        );
+    }
+
+    #[test]
+    fn variable_width_streaming_stays_contiguous_and_reconstructs_text() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "foo trans\u{00AD}atlantic said \"hello\" to 世界 and waved. According to محمد الأحمد, alpha\u{200B}beta 🚀",
+            &style,
+            &PrepareOptions::default(),
+        );
+        let widths = [
+            140.0, 72.0, 108.0, 64.0, 160.0, 84.0, 116.0, 70.0, 180.0, 92.0, 128.0, 76.0, 150.0,
+            88.0, 132.0, 78.0, 170.0, 96.0, 124.0, 80.0,
+        ];
+        let lines = collect_streamed_lines_with_widths(
+            &engine,
+            &prepared,
+            &widths,
+            LayoutCursor::default(),
+        );
+        let expected = prepared.inner().text().to_owned();
+
+        assert!(lines.len() > 2);
+        assert_eq!(lines[0].start, LayoutCursor::default());
+        for index in 0..lines.len() {
+            assert_eq!(
+                cursor_cmp(lines[index].end, lines[index].start),
+                CmpOrdering::Greater
+            );
+            if index > 0 {
+                assert_eq!(lines[index].start, lines[index - 1].end);
+            }
+        }
+        assert_eq!(lines.last().unwrap().end, terminal_cursor(&prepared));
+        assert_eq!(
+            reconstruct_from_line_boundaries(&prepared, &lines),
+            expected
+        );
+
+        let mut cursor = terminal_cursor(&prepared);
+        assert!(engine
+            .layout_next_line(&prepared, &mut cursor, *widths.last().unwrap())
+            .is_none());
+    }
+
+    #[test]
+    fn variable_width_streaming_pre_wrap_stays_contiguous_and_reconstructs_text() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "foo\n  bar baz\n\tquux quuz",
+            &style,
+            &PrepareOptions {
+                white_space: WhiteSpaceMode::PreWrap,
+                paragraph_direction: ParagraphDirection::Auto,
+            },
+        );
+        let widths = [
+            200.0, 62.0, 80.0, 200.0, 72.0, 200.0, 84.0, 200.0, 90.0, 200.0,
+        ];
+        let lines = collect_streamed_lines_with_widths(
+            &engine,
+            &prepared,
+            &widths,
+            LayoutCursor::default(),
+        );
+        let expected = prepared.inner().text().to_owned();
+
+        assert!(lines.len() >= 4);
+        assert_eq!(lines[0].start, LayoutCursor::default());
+        for index in 0..lines.len() {
+            assert_eq!(
+                cursor_cmp(lines[index].end, lines[index].start),
+                CmpOrdering::Greater
+            );
+            if index > 0 {
+                assert_eq!(lines[index].start, lines[index - 1].end);
+            }
+        }
+        assert_eq!(lines.last().unwrap().end, terminal_cursor(&prepared));
+        assert_eq!(
+            reconstruct_from_line_boundaries(&prepared, &lines),
+            expected
         );
     }
 }

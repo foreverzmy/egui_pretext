@@ -10,11 +10,32 @@ const ATLAS_PAGE_SIZE: usize = 2048;
 const ATLAS_GLYPH_PADDING_PX: usize = 1;
 const ATLAS_TEXTURE_OPTIONS: TextureOptions = TextureOptions::LINEAR;
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GlyphAtlasStats {
     pub pages: usize,
     pub entries: usize,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+#[derive(Default)]
+pub struct GlyphSceneBuilder {
+    meshes: AHashMap<egui::TextureId, Mesh>,
+    glyph_quads: u64,
+    painted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlyphSceneFlushStats {
+    pub mesh_flushes: u64,
+    pub glyph_quads: u64,
+    pub painted: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlyphWarmResult {
+    Hit,
+    Miss,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -59,6 +80,8 @@ pub struct GlyphAtlas {
     pages: Vec<AtlasPage>,
     entries: AHashMap<GlyphRasterKey, GlyphAtlasEntry>,
     face_metrics: AHashMap<FaceMetricKey, FaceMetrics>,
+    hits: u64,
+    misses: u64,
 }
 
 impl Default for GlyphAtlas {
@@ -67,17 +90,24 @@ impl Default for GlyphAtlas {
             pages: Vec::new(),
             entries: AHashMap::new(),
             face_metrics: AHashMap::new(),
+            hits: 0,
+            misses: 0,
         }
     }
 }
 
 impl GlyphAtlas {
-    #[cfg(test)]
     pub fn stats(&self) -> GlyphAtlasStats {
         GlyphAtlasStats {
             pages: self.pages.len(),
             entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
         }
+    }
+
+    pub fn begin_scene(&self) -> GlyphSceneBuilder {
+        GlyphSceneBuilder::default()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -95,18 +125,49 @@ impl GlyphAtlas {
         texture_uploads: &mut u64,
         texture_upload_bytes: &mut u64,
     ) -> bool {
+        let mut scene = self.begin_scene();
+        let painted = self.append_line_glyph_runs(
+            &mut scene,
+            x,
+            y,
+            glyph_runs,
+            style,
+            line_height,
+            color,
+            ctx,
+            engine,
+            texture_uploads,
+            texture_upload_bytes,
+        );
+        let _ = self.flush_scene(painter, &mut scene);
+        painted
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_line_glyph_runs(
+        &mut self,
+        scene: &mut GlyphSceneBuilder,
+        x: f32,
+        y: f32,
+        glyph_runs: &[LayoutLineGlyphRun],
+        style: &TextStyleSpec,
+        line_height: f32,
+        color: Color32,
+        ctx: &Context,
+        engine: &PretextEngine,
+        texture_uploads: &mut u64,
+        texture_upload_bytes: &mut u64,
+    ) -> bool {
         if glyph_runs.is_empty() {
             return false;
         }
 
         let pixels_per_point = ctx.pixels_per_point().max(1.0);
         let baseline_y = y + self.baseline_px(glyph_runs, style, line_height, engine);
-        let mut meshes = AHashMap::<egui::TextureId, Mesh>::new();
-        let mut painted = false;
 
         for run in glyph_runs {
             for glyph in &run.glyphs {
-                let Some(entry) = self.glyph_entry(
+                let Some(lookup) = self.glyph_entry(
                     ctx,
                     engine,
                     glyph.face_id,
@@ -121,33 +182,84 @@ impl GlyphAtlas {
 
                 let rect_min = egui::pos2(
                     snap_to_pixel(
-                        x + glyph.x + glyph.x_offset + entry.offset.x,
+                        x + glyph.x + glyph.x_offset + lookup.entry.offset.x,
                         pixels_per_point,
                     ),
-                    snap_to_pixel(baseline_y - glyph.y_offset + entry.offset.y, pixels_per_point),
+                    snap_to_pixel(
+                        baseline_y - glyph.y_offset + lookup.entry.offset.y,
+                        pixels_per_point,
+                    ),
                 );
-                let rect = Rect::from_min_size(rect_min, entry.logical_size);
-                let mesh = meshes
-                    .entry(self.pages[entry.page_index].texture.id())
-                    .or_insert_with(|| {
-                        Mesh::with_texture(self.pages[entry.page_index].texture.id())
-                    });
+                let rect = Rect::from_min_size(rect_min, lookup.entry.logical_size);
+                let texture_id = self.pages[lookup.entry.page_index].texture.id();
+                let mesh = scene
+                    .meshes
+                    .entry(texture_id)
+                    .or_insert_with(|| Mesh::with_texture(texture_id));
                 mesh.add_rect_with_uv(
                     rect,
-                    entry.uv_rect,
-                    if entry.is_color { Color32::WHITE } else { color },
+                    lookup.entry.uv_rect,
+                    if lookup.entry.is_color {
+                        Color32::WHITE
+                    } else {
+                        color
+                    },
                 );
-                painted = true;
+                scene.painted = true;
+                scene.glyph_quads += 1;
             }
         }
 
-        for mesh in meshes.into_values() {
-            if !mesh.is_empty() {
-                painter.add(Shape::mesh(mesh));
+        scene.painted
+    }
+
+    pub fn flush_scene(
+        &mut self,
+        painter: &Painter,
+        scene: &mut GlyphSceneBuilder,
+    ) -> GlyphSceneFlushStats {
+        let mut flush_stats = GlyphSceneFlushStats {
+            glyph_quads: scene.glyph_quads,
+            painted: scene.painted,
+            ..GlyphSceneFlushStats::default()
+        };
+
+        for mesh in std::mem::take(&mut scene.meshes).into_values() {
+            if mesh.is_empty() {
+                continue;
             }
+            painter.add(Shape::mesh(mesh));
+            flush_stats.mesh_flushes += 1;
         }
 
-        painted
+        scene.glyph_quads = 0;
+        scene.painted = false;
+        flush_stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn warm_glyph(
+        &mut self,
+        ctx: &Context,
+        engine: &PretextEngine,
+        face_id: FontId,
+        glyph_id: u16,
+        size_px: f32,
+        pixels_per_point: f32,
+        texture_uploads: &mut u64,
+        texture_upload_bytes: &mut u64,
+    ) -> Option<GlyphWarmResult> {
+        self.glyph_entry(
+            ctx,
+            engine,
+            face_id,
+            glyph_id,
+            size_px,
+            pixels_per_point,
+            texture_uploads,
+            texture_upload_bytes,
+        )
+        .map(|lookup| lookup.result)
     }
 
     fn baseline_px(
@@ -212,7 +324,7 @@ impl GlyphAtlas {
         pixels_per_point: f32,
         texture_uploads: &mut u64,
         texture_upload_bytes: &mut u64,
-    ) -> Option<GlyphAtlasEntry> {
+    ) -> Option<GlyphLookup> {
         let key = GlyphRasterKey {
             engine_revision: engine.revision(),
             face_id,
@@ -221,8 +333,13 @@ impl GlyphAtlas {
             pixels_per_point_q: quantize(pixels_per_point),
         };
         if let Some(entry) = self.entries.get(&key).cloned() {
-            return Some(entry);
+            self.hits += 1;
+            return Some(GlyphLookup {
+                entry,
+                result: GlyphWarmResult::Hit,
+            });
         }
+        self.misses += 1;
 
         let face = engine.load_face(face_id)?;
         let raster = rasterize_glyph(&face, glyph_id, size_px, pixels_per_point)?;
@@ -231,8 +348,7 @@ impl GlyphAtlas {
         page.texture
             .set_partial(placement.pos, raster.image, ATLAS_TEXTURE_OPTIONS);
         *texture_uploads += 1;
-        *texture_upload_bytes +=
-            (placement.upload_size[0] * placement.upload_size[1] * 4) as u64;
+        *texture_upload_bytes += (placement.upload_size[0] * placement.upload_size[1] * 4) as u64;
 
         let entry = GlyphAtlasEntry {
             page_index: placement.page_index,
@@ -242,7 +358,10 @@ impl GlyphAtlas {
             is_color: raster.is_color,
         };
         self.entries.insert(key, entry.clone());
-        Some(entry)
+        Some(GlyphLookup {
+            entry,
+            result: GlyphWarmResult::Miss,
+        })
     }
 
     fn allocate(&mut self, size: [usize; 2], ctx: &Context) -> Option<Allocation> {
@@ -280,6 +399,11 @@ struct Allocation {
     pos: [usize; 2],
     upload_size: [usize; 2],
     uv_rect: Rect,
+}
+
+struct GlyphLookup {
+    entry: GlyphAtlasEntry,
+    result: GlyphWarmResult,
 }
 
 struct RasterizedGlyph {
@@ -366,17 +490,14 @@ fn rasterize_outline_glyph(
         -left_px + ATLAS_GLYPH_PADDING_PX as f32,
         -top_px + ATLAS_GLYPH_PADDING_PX as f32,
     );
-    pixmap.fill_path(
-        &path,
-        &paint,
-        tiny_skia::FillRule::Winding,
-        transform,
-        None,
-    );
+    pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
 
     Some(RasterizedGlyph {
         image: ColorImage::from_rgba_premultiplied([width, height], pixmap.data()),
-        logical_size: egui::vec2(width as f32 / pixels_per_point, height as f32 / pixels_per_point),
+        logical_size: egui::vec2(
+            width as f32 / pixels_per_point,
+            height as f32 / pixels_per_point,
+        ),
         offset: egui::vec2(
             left_px / pixels_per_point - ATLAS_GLYPH_PADDING_PX as f32 / pixels_per_point,
             top_px / pixels_per_point - ATLAS_GLYPH_PADDING_PX as f32 / pixels_per_point,
@@ -439,7 +560,9 @@ fn rasterize_bitmap_glyph(
     size_px: f32,
     pixels_per_point: f32,
 ) -> Option<RasterizedGlyph> {
-    let desired_ppem = (size_px * pixels_per_point).round().clamp(1.0, u16::MAX as f32) as u16;
+    let desired_ppem = (size_px * pixels_per_point)
+        .round()
+        .clamp(1.0, u16::MAX as f32) as u16;
     let image = face.glyph_raster_image(glyph_id, desired_ppem)?;
     let scale = desired_ppem as f32 / image.pixels_per_em.max(1) as f32;
     let rgba = decode_raster_image(&image)?;

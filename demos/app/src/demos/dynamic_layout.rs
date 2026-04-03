@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
@@ -9,16 +10,18 @@ use egui::{
 use pretext::BidiDirection;
 use pretext::{
     LayoutCursor, LayoutLineGlyphRun, LayoutLineVisualRun, PrepareOptions,
-    PreparedTextWithSegments, PretextEngine,
-    WhiteSpaceMode,
+    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
 };
-use pretext_egui::{AssetRegistry, SvgAssetId};
+use pretext_egui::{
+    AssetRegistry, PretextFragmentPaintOptions, PretextFragmentPainter, SvgAssetId,
+};
 
-use crate::demos::text_runs::paint_glyph_runs;
-use crate::demos::DemoWindow;
+use crate::demos::{DemoPerfStats, DemoWindow};
+#[cfg(test)]
+use crate::geometry::carve_text_line_slots;
 use crate::geometry::{
-    carve_text_line_slots, get_polygon_interval_for_band, get_rect_intervals_for_band,
-    is_point_in_polygon, svg_alpha_hull, transform_points, Interval, Point, Rect as GeoRect,
+    append_rect_intervals_for_band, carve_text_line_slots_into, is_point_in_polygon,
+    svg_alpha_hull, transform_points, Interval, Point, PolygonBandCache, Rect as GeoRect,
 };
 
 const HEADLINE: &str = "SITUATIONAL AWARENESS: THE DECADE AHEAD";
@@ -138,20 +141,35 @@ const HINT_PILL_SAFE_TOP: f32 = 72.0;
 const NARROW_BREAKPOINT: f32 = 760.0;
 const NARROW_COLUMN_MAX_WIDTH: f32 = 430.0;
 const UNBOUNDED_WIDTH: f32 = 100_000.0;
+const DYNAMIC_REFLOW_BUCKET_PX: f32 = 2.0;
 
 pub struct DynamicLayoutDemo {
     open: bool,
     openai_logo: LogoAnimationState,
     claude_logo: LogoAnimationState,
+    prepared_engine_revision: Option<u64>,
     body_prepared: Option<PreparedTextWithSegments>,
+    headline_prepared: Option<PreparedTextWithSegments>,
+    headline_prepared_size_q: Option<u32>,
     credit_prepared: Option<PreparedTextWithSegments>,
+    credit_width: Option<f32>,
     hulls: Option<LogoHulls>,
+    layout_cache: Option<CachedPageLayout>,
+    openai_geometry_cache: Option<CachedLogoGeometry>,
+    claude_geometry_cache: Option<CachedLogoGeometry>,
+    projection_cache: Option<CachedDynamicProjection>,
+    projection_cache_stats: DynamicProjectionCacheStats,
 }
 
 #[derive(Clone)]
 struct LogoHulls {
     openai: Vec<Point>,
     claude: Vec<Point>,
+}
+
+struct TransformedLogoGeometry {
+    polygon: Vec<Point>,
+    scanlines: Arc<PolygonBandCache>,
 }
 
 #[derive(Clone, Copy)]
@@ -168,12 +186,123 @@ struct LogoAnimationState {
     spin: Option<SpinState>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct DynamicProjection {
-    headline_lines: Vec<PositionedLine>,
+    headline_lines: Vec<Arc<PositionedLine>>,
     credit_line: Option<PositionedLine>,
-    left_lines: Vec<PositionedLine>,
-    right_lines: Vec<PositionedLine>,
+    left_lines: Vec<Arc<PositionedLine>>,
+    right_lines: Vec<Arc<PositionedLine>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DynamicLayoutKey {
+    engine_revision: u64,
+    page_width_q: u32,
+    page_height_q: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DynamicProjectionKey {
+    layout_key: DynamicLayoutKey,
+    openai_angle_q: i32,
+    claude_angle_q: i32,
+}
+
+struct CachedPageLayout {
+    key: DynamicLayoutKey,
+    layout: PageLayout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DynamicLogoGeometryKey {
+    layout_key: DynamicLayoutKey,
+    angle_q: i32,
+}
+
+struct CachedLogoGeometry {
+    key: DynamicLogoGeometryKey,
+    scanlines: Arc<PolygonBandCache>,
+}
+
+struct CachedDynamicProjection {
+    key: DynamicProjectionKey,
+    projection: DynamicProjection,
+    headline_plan: DynamicColumnPlan,
+    headline_column: CachedDynamicColumn,
+    headline_title_bands: Arc<[Vec<Interval>]>,
+    headline_bottom: f32,
+    headline_title_span: Option<DynamicVerticalSpan>,
+    primary_body_plan: DynamicColumnPlan,
+    primary_body_column: CachedDynamicColumn,
+    secondary_body_plan: Option<DynamicColumnPlan>,
+    secondary_body_column: Option<CachedDynamicColumn>,
+    openai_span: Option<DynamicVerticalSpan>,
+    claude_span: Option<DynamicVerticalSpan>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DynamicProjectionCacheStats {
+    bucket_hits: usize,
+    dirty_bands: usize,
+    full_recomputes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DynamicVerticalSpan {
+    top: f32,
+    bottom: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DynamicColumnCacheStats {
+    dirty_bands: usize,
+    full_recomputes: usize,
+}
+
+#[derive(Clone)]
+struct DynamicColumnPlan {
+    bands: Vec<DynamicBandPlan>,
+}
+
+#[derive(Clone)]
+struct DynamicBandPlan {
+    line_top: f32,
+    slot: Option<Interval>,
+    signature: DynamicBandSignature,
+}
+
+#[derive(Clone)]
+struct CachedDynamicColumn {
+    bands: Vec<CachedDynamicBand>,
+}
+
+#[derive(Clone)]
+struct CachedDynamicBand {
+    input_cursor: LayoutCursor,
+    signature: DynamicBandSignature,
+    line_count_before: usize,
+    line: Option<Arc<PositionedLine>>,
+    output_cursor: LayoutCursor,
+    exhausted_text: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DynamicBandSignature {
+    line_top_q: u32,
+    slot: Option<DynamicBandIntervalKey>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DynamicBandIntervalKey {
+    left_bits: u32,
+    right_bits: u32,
+}
+
+#[derive(Default)]
+struct DynamicBandScratch {
+    blocked: Vec<Interval>,
+    slots: Vec<Interval>,
+    scratch_slots: Vec<Interval>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,14 +334,18 @@ struct PageLayout {
 #[derive(Clone, Copy)]
 enum BandObstacle<'a> {
     Polygon {
-        points: &'a [Point],
+        scanlines: &'a PolygonBandCache,
         horizontal_padding: f32,
         vertical_padding: f32,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     Rects {
         rects: &'a [GeoRect],
         horizontal_padding: f32,
         vertical_padding: f32,
+    },
+    BandIntervals {
+        bands: &'a [Vec<Interval>],
     },
 }
 
@@ -228,9 +361,18 @@ impl Default for DynamicLayoutDemo {
             open: false,
             openai_logo: LogoAnimationState::default(),
             claude_logo: LogoAnimationState::default(),
+            prepared_engine_revision: None,
             body_prepared: None,
+            headline_prepared: None,
+            headline_prepared_size_q: None,
             credit_prepared: None,
+            credit_width: None,
             hulls: None,
+            layout_cache: None,
+            openai_geometry_cache: None,
+            claude_geometry_cache: None,
+            projection_cache: None,
+            projection_cache_stats: DynamicProjectionCacheStats::default(),
         }
     }
 }
@@ -246,6 +388,13 @@ impl DemoWindow for DynamicLayoutDemo {
 
     fn set_open(&mut self, open: bool) {
         self.open = open;
+        if !open {
+            self.layout_cache = None;
+            self.openai_geometry_cache = None;
+            self.claude_geometry_cache = None;
+            self.projection_cache = None;
+            self.projection_cache_stats = DynamicProjectionCacheStats::default();
+        }
     }
 
     fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
@@ -253,7 +402,7 @@ impl DemoWindow for DynamicLayoutDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1120.0, 780.0))
+            .default_size(egui::vec2(2240.0, 1560.0))
             .show(ctx, |ui| {
                 let now = ctx.input(|input| input.time);
                 let animating = update_spin_state(&mut self.openai_logo, now)
@@ -265,73 +414,75 @@ impl DemoWindow for DynamicLayoutDemo {
                 let (page_rect, _) =
                     ui.allocate_exact_size(egui::vec2(page_width, page_height), Sense::hover());
 
-                let body_prepared = self.ensure_body_prepared(engine).clone();
-                let credit_prepared = self.ensure_credit_prepared(engine).clone();
-                let hulls = self.ensure_hulls().clone();
-                let layout = build_page_layout(page_rect, engine);
-
-                let openai_poly =
-                    transform_points(&hulls.openai, layout.openai_rect, self.openai_logo.angle);
-                let claude_poly =
-                    transform_points(&hulls.claude, layout.claude_rect, self.claude_logo.angle);
-                let projection = evaluate_layout(
-                    engine,
-                    &body_prepared,
-                    &credit_prepared,
-                    layout,
-                    &openai_poly,
-                    &claude_poly,
-                );
+                self.invalidate_engine_caches_if_needed(engine);
+                let layout = self.ensure_layout(page_rect, engine);
+                let (openai_geometry, claude_geometry) = self.frame_logo_geometries(engine, layout);
 
                 let painter = ui.painter().clone();
                 paint_page_background(&painter, page_rect);
 
-                paint_positioned_lines(
-                    &painter,
-                    &projection.headline_lines,
-                    &headline_style(layout.headline_size),
-                    layout.headline_line_height,
-                    headline_render_slack_y(layout.headline_size, layout.headline_line_height),
-                    Color32::from_rgb(17, 16, 13),
-                    ctx,
-                    engine,
-                    assets,
-                );
-                if let Some(credit_line) = &projection.credit_line {
-                    paint_positioned_lines(
-                        &painter,
-                        std::slice::from_ref(credit_line),
-                        &credit_style(),
+                {
+                    let projection = self.ensure_projection(
+                        engine,
+                        layout,
+                        openai_geometry.scanlines.as_ref(),
+                        claude_geometry.scanlines.as_ref(),
+                    );
+                    let headline_text_style = headline_style(layout.headline_size);
+                    let credit_text_style = credit_style();
+                    let body_text_style = body_style();
+                    let headline_options = fragment_paint_options(
+                        &headline_text_style,
+                        layout.headline_line_height,
+                        Color32::from_rgb(17, 16, 13),
+                    );
+                    let credit_options = fragment_paint_options(
+                        &credit_text_style,
                         CREDIT_LINE_HEIGHT,
-                        2.0,
                         Color32::from_rgba_premultiplied(17, 16, 13, 148),
+                    );
+                    let body_options = fragment_paint_options(
+                        &body_text_style,
+                        BODY_LINE_HEIGHT,
+                        Color32::from_rgb(17, 16, 13),
+                    );
+                    let mut fragment_painter = PretextFragmentPainter::new(assets);
+                    queue_positioned_lines(
+                        &mut fragment_painter,
+                        projection.headline_lines.iter().map(Arc::as_ref),
+                        &headline_options,
                         ctx,
                         engine,
                         assets,
                     );
+                    if let Some(credit_line) = &projection.credit_line {
+                        queue_positioned_lines(
+                            &mut fragment_painter,
+                            std::slice::from_ref(credit_line),
+                            &credit_options,
+                            ctx,
+                            engine,
+                            assets,
+                        );
+                    }
+                    queue_positioned_lines(
+                        &mut fragment_painter,
+                        projection.left_lines.iter().map(Arc::as_ref),
+                        &body_options,
+                        ctx,
+                        engine,
+                        assets,
+                    );
+                    queue_positioned_lines(
+                        &mut fragment_painter,
+                        projection.right_lines.iter().map(Arc::as_ref),
+                        &body_options,
+                        ctx,
+                        engine,
+                        assets,
+                    );
+                    let _ = fragment_painter.finish(&painter, ctx, assets);
                 }
-                paint_positioned_lines(
-                    &painter,
-                    &projection.left_lines,
-                    &body_style(),
-                    BODY_LINE_HEIGHT,
-                    2.0,
-                    Color32::from_rgb(17, 16, 13),
-                    ctx,
-                    engine,
-                    assets,
-                );
-                paint_positioned_lines(
-                    &painter,
-                    &projection.right_lines,
-                    &body_style(),
-                    BODY_LINE_HEIGHT,
-                    2.0,
-                    Color32::from_rgb(17, 16, 13),
-                    ctx,
-                    engine,
-                    assets,
-                );
 
                 paint_logo_shadow(
                     &painter,
@@ -369,7 +520,7 @@ impl DemoWindow for DynamicLayoutDemo {
                     now,
                     "openai-logo",
                     layout.openai_rect,
-                    &openai_poly,
+                    &openai_geometry.polygon,
                     &mut self.openai_logo,
                     -1.0,
                 );
@@ -378,7 +529,7 @@ impl DemoWindow for DynamicLayoutDemo {
                     now,
                     "claude-logo",
                     layout.claude_rect,
-                    &claude_poly,
+                    &claude_geometry.polygon,
                     &mut self.claude_logo,
                     1.0,
                 );
@@ -389,9 +540,37 @@ impl DemoWindow for DynamicLayoutDemo {
             });
         self.open = open;
     }
+
+    fn perf_stats(&self) -> DemoPerfStats {
+        DemoPerfStats {
+            dynamic_bucket_hits: self.projection_cache_stats.bucket_hits,
+            dynamic_dirty_bands: self.projection_cache_stats.dirty_bands,
+            dynamic_full_recomputes: self.projection_cache_stats.full_recomputes,
+            ..DemoPerfStats::default()
+        }
+    }
 }
 
 impl DynamicLayoutDemo {
+    fn invalidate_engine_caches_if_needed(&mut self, engine: &PretextEngine) {
+        let revision = engine.revision();
+        if self.prepared_engine_revision == Some(revision) {
+            return;
+        }
+
+        self.prepared_engine_revision = Some(revision);
+        self.body_prepared = None;
+        self.headline_prepared = None;
+        self.headline_prepared_size_q = None;
+        self.credit_prepared = None;
+        self.credit_width = None;
+        self.layout_cache = None;
+        self.openai_geometry_cache = None;
+        self.claude_geometry_cache = None;
+        self.projection_cache = None;
+        self.projection_cache_stats = DynamicProjectionCacheStats::default();
+    }
+
     fn ensure_body_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.body_prepared.is_none() {
             self.body_prepared =
@@ -412,6 +591,35 @@ impl DynamicLayoutDemo {
             .expect("dynamic credit should be prepared")
     }
 
+    fn ensure_credit_width(&mut self, engine: &PretextEngine) -> f32 {
+        if self.credit_width.is_none() {
+            let width =
+                measure_single_line_width(engine, self.ensure_credit_prepared(engine)).ceil();
+            self.credit_width = Some(width);
+        }
+        self.credit_width
+            .expect("dynamic credit width should be prepared")
+    }
+
+    fn ensure_headline_prepared(
+        &mut self,
+        engine: &PretextEngine,
+        headline_size: f32,
+    ) -> &PreparedTextWithSegments {
+        let size_q = quantize_dynamic_value(headline_size);
+        if self.headline_prepared_size_q != Some(size_q) || self.headline_prepared.is_none() {
+            self.headline_prepared = Some(engine.prepare_with_segments(
+                HEADLINE,
+                &headline_style(headline_size),
+                &normal_options(),
+            ));
+            self.headline_prepared_size_q = Some(size_q);
+        }
+        self.headline_prepared
+            .as_ref()
+            .expect("dynamic headline should be prepared")
+    }
+
     fn ensure_hulls(&mut self) -> &LogoHulls {
         if self.hulls.is_none() {
             let openai = svg_alpha_hull(
@@ -428,6 +636,151 @@ impl DynamicLayoutDemo {
         }
         self.hulls.as_ref().expect("dynamic hulls should exist")
     }
+
+    fn ensure_layout(&mut self, page_rect: Rect, engine: &PretextEngine) -> PageLayout {
+        let key = DynamicLayoutKey {
+            engine_revision: engine.revision(),
+            page_width_q: quantize_dynamic_value(page_rect.width()),
+            page_height_q: quantize_dynamic_value(page_rect.height()),
+        };
+        if self
+            .layout_cache
+            .as_ref()
+            .is_none_or(|cached| cached.key != key)
+        {
+            self.layout_cache = Some(CachedPageLayout {
+                key,
+                layout: build_page_layout(page_rect, engine),
+            });
+            self.openai_geometry_cache = None;
+            self.claude_geometry_cache = None;
+            self.projection_cache = None;
+            self.projection_cache_stats = DynamicProjectionCacheStats::default();
+        }
+
+        self.layout_cache
+            .as_ref()
+            .expect("dynamic layout cache should exist")
+            .layout
+    }
+
+    fn ensure_projection(
+        &mut self,
+        engine: &PretextEngine,
+        layout: PageLayout,
+        openai_scanlines: &PolygonBandCache,
+        claude_scanlines: &PolygonBandCache,
+    ) -> &DynamicProjection {
+        let layout_key = self.current_layout_key(engine, layout);
+        let key = DynamicProjectionKey {
+            layout_key,
+            openai_angle_q: quantize_dynamic_reflow_angle(
+                layout.openai_rect,
+                self.openai_logo.angle,
+            ),
+            claude_angle_q: quantize_dynamic_reflow_angle(
+                layout.claude_rect,
+                self.claude_logo.angle,
+            ),
+        };
+        if self
+            .projection_cache
+            .as_ref()
+            .is_some_and(|cached| cached.key == key)
+        {
+            self.projection_cache_stats = DynamicProjectionCacheStats {
+                bucket_hits: 1,
+                ..DynamicProjectionCacheStats::default()
+            };
+            return &self
+                .projection_cache
+                .as_ref()
+                .expect("dynamic projection cache should exist")
+                .projection;
+        }
+
+        self.ensure_body_prepared(engine);
+        self.ensure_headline_prepared(engine, layout.headline_size);
+        let credit_width = self.ensure_credit_width(engine);
+        let cached_projection = self
+            .projection_cache
+            .take()
+            .filter(|cached| cached.key.layout_key == layout_key);
+        let (next_projection, next_stats) = {
+            let (body_prepared, headline_prepared, credit_prepared) = match (
+                &self.body_prepared,
+                &self.headline_prepared,
+                &self.credit_prepared,
+            ) {
+                (Some(body), Some(headline), Some(credit)) => (body, headline, credit),
+                _ => unreachable!("dynamic prepared text should exist"),
+            };
+            compute_dynamic_projection(
+                engine,
+                body_prepared,
+                headline_prepared,
+                credit_prepared,
+                credit_width,
+                layout,
+                openai_scanlines,
+                claude_scanlines,
+                key,
+                cached_projection,
+            )
+        };
+        self.projection_cache_stats = next_stats;
+        self.projection_cache = Some(next_projection);
+
+        &self
+            .projection_cache
+            .as_ref()
+            .expect("dynamic projection cache should exist")
+            .projection
+    }
+
+    fn current_layout_key(&self, engine: &PretextEngine, layout: PageLayout) -> DynamicLayoutKey {
+        self.layout_cache
+            .as_ref()
+            .map(|cached| cached.key)
+            .unwrap_or(DynamicLayoutKey {
+                engine_revision: engine.revision(),
+                page_width_q: quantize_dynamic_value(layout.page.width),
+                page_height_q: quantize_dynamic_value(layout.page.height),
+            })
+    }
+
+    fn frame_logo_geometries(
+        &mut self,
+        engine: &PretextEngine,
+        layout: PageLayout,
+    ) -> (TransformedLogoGeometry, TransformedLogoGeometry) {
+        self.ensure_hulls();
+        let layout_key = self.current_layout_key(engine, layout);
+        let openai_angle = self.openai_logo.angle;
+        let claude_angle = self.claude_logo.angle;
+        let DynamicLayoutDemo {
+            hulls,
+            openai_geometry_cache,
+            claude_geometry_cache,
+            ..
+        } = self;
+        let hulls = hulls.as_ref().expect("dynamic hulls should exist");
+        let openai_geometry = cached_logo_geometry(
+            openai_geometry_cache,
+            layout_key,
+            &hulls.openai,
+            layout.openai_rect,
+            openai_angle,
+        );
+        let claude_geometry = cached_logo_geometry(
+            claude_geometry_cache,
+            layout_key,
+            &hulls.claude,
+            layout.claude_rect,
+            claude_angle,
+        );
+        (openai_geometry, claude_geometry)
+    }
 }
 
 fn normal_options() -> PrepareOptions {
@@ -435,6 +788,23 @@ fn normal_options() -> PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
         paragraph_direction: pretext::ParagraphDirection::Auto,
     }
+}
+
+fn quantize_dynamic_value(value: f32) -> u32 {
+    (value.max(0.0) * 4.0).round() as u32
+}
+
+fn quantize_dynamic_reflow_angle(rect: GeoRect, angle: f32) -> i32 {
+    (angle / dynamic_reflow_bucket_angle(rect)).round() as i32
+}
+
+fn dynamic_reflow_bucket_angle(rect: GeoRect) -> f32 {
+    let radius = (rect.width.max(rect.height) * 0.5).max(1.0);
+    DYNAMIC_REFLOW_BUCKET_PX / radius
+}
+
+fn snapped_dynamic_reflow_angle(rect: GeoRect, angle_q: i32) -> f32 {
+    angle_q as f32 * dynamic_reflow_bucket_angle(rect)
 }
 
 fn serif_families() -> Vec<String> {
@@ -638,37 +1008,72 @@ fn build_page_layout(page_rect: Rect, engine: &PretextEngine) -> PageLayout {
     }
 }
 
-fn get_obstacle_intervals(
+fn append_obstacle_intervals(
+    blocked: &mut Vec<Interval>,
     obstacle: &BandObstacle<'_>,
+    band_index: usize,
     band_top: f32,
     band_bottom: f32,
-) -> Vec<Interval> {
+) {
     match *obstacle {
         BandObstacle::Polygon {
-            points,
+            scanlines,
             horizontal_padding,
             vertical_padding,
-        } => get_polygon_interval_for_band(
-            points,
-            band_top,
-            band_bottom,
-            horizontal_padding,
-            vertical_padding,
-        )
-        .into_iter()
-        .collect(),
+        } => {
+            if let Some(interval) = scanlines.interval_for_band(
+                band_top,
+                band_bottom,
+                horizontal_padding,
+                vertical_padding,
+            ) {
+                blocked.push(interval);
+            }
+        }
         BandObstacle::Rects {
             rects,
             horizontal_padding,
             vertical_padding,
-        } => get_rect_intervals_for_band(
+        } => append_rect_intervals_for_band(
+            blocked,
             rects,
             band_top,
             band_bottom,
             horizontal_padding,
             vertical_padding,
         ),
+        BandObstacle::BandIntervals { bands } => {
+            if let Some(intervals) = bands.get(band_index) {
+                blocked.extend(intervals.iter().copied());
+            }
+        }
     }
+}
+
+fn build_rect_band_interval_cache(
+    rects: &[GeoRect],
+    region: GeoRect,
+    line_height: f32,
+    horizontal_padding: f32,
+    vertical_padding: f32,
+) -> Arc<[Vec<Interval>]> {
+    let band_count = dynamic_band_count(region, line_height);
+    let mut bands = Vec::with_capacity(band_count);
+    for band_index in 0..band_count {
+        let band_top = region.y + band_index as f32 * line_height;
+        let band_bottom = band_top + line_height;
+        let mut intervals = Vec::new();
+        append_rect_intervals_for_band(
+            &mut intervals,
+            rects,
+            band_top,
+            band_bottom,
+            horizontal_padding,
+            vertical_padding,
+        );
+        bands.push(intervals);
+    }
+    Arc::from(bands)
 }
 
 fn choose_slot(slots: &[Interval], side: ColumnSide) -> Interval {
@@ -692,6 +1097,7 @@ fn choose_slot(slots: &[Interval], side: ColumnSide) -> Interval {
     best
 }
 
+#[cfg(test)]
 fn layout_column(
     engine: &PretextEngine,
     prepared: &PreparedTextWithSegments,
@@ -703,6 +1109,7 @@ fn layout_column(
 ) -> (Vec<PositionedLine>, LayoutCursor) {
     let mut cursor = start_cursor;
     let mut line_top = region.y;
+    let mut band_index = 0;
     let mut lines = Vec::new();
 
     while line_top + line_height <= region.bottom() {
@@ -710,7 +1117,7 @@ fn layout_column(
         let band_bottom = line_top + line_height;
         let mut blocked = Vec::new();
         for obstacle in obstacles {
-            blocked.extend(get_obstacle_intervals(obstacle, band_top, band_bottom));
+            append_obstacle_intervals(&mut blocked, obstacle, band_index, band_top, band_bottom);
         }
 
         let slots = carve_text_line_slots(
@@ -722,12 +1129,13 @@ fn layout_column(
         );
         if slots.is_empty() {
             line_top += line_height;
+            band_index += 1;
             continue;
         }
 
         let slot = choose_slot(&slots, side);
         let mut next_cursor = cursor;
-        let Some(line) = engine.layout_next_line(
+        let Some(line) = engine.layout_next_line_with_runs(
             prepared,
             &mut next_cursor,
             (slot.right - slot.left).max(1.0),
@@ -738,24 +1146,23 @@ fn layout_column(
             break;
         }
 
-        let visual_runs = engine.line_visual_runs(prepared, &line);
-        let glyph_runs = engine.line_glyph_runs(prepared, &line);
         lines.push(PositionedLine {
             x: slot.left.round(),
             y: line_top.round(),
-            width: line.width,
-            text: line.text,
-            visual_runs,
-            glyph_runs,
+            width: line.line.width,
+            text: line.line.text,
+            visual_runs: line.runs.visual_runs,
+            glyph_runs: line.runs.glyph_runs,
         });
         cursor = next_cursor;
         line_top += line_height;
+        band_index += 1;
     }
 
     (lines, cursor)
 }
 
-fn positioned_line_rects(lines: &[PositionedLine], line_height: f32) -> Vec<GeoRect> {
+fn positioned_line_rects(lines: &[Arc<PositionedLine>], line_height: f32) -> Vec<GeoRect> {
     lines
         .iter()
         .map(|line| GeoRect {
@@ -767,46 +1174,437 @@ fn positioned_line_rects(lines: &[PositionedLine], line_height: f32) -> Vec<GeoR
         .collect()
 }
 
-fn evaluate_layout(
-    engine: &PretextEngine,
-    body_prepared: &PreparedTextWithSegments,
-    credit_prepared: &PreparedTextWithSegments,
-    layout: PageLayout,
-    openai_polygon: &[Point],
-    claude_polygon: &[Point],
-) -> DynamicProjection {
-    let openai_obstacle = BandObstacle::Polygon {
-        points: openai_polygon,
-        horizontal_padding: (BODY_LINE_HEIGHT * 0.82).round(),
-        vertical_padding: (BODY_LINE_HEIGHT * 0.26).round(),
-    };
-    let claude_obstacle = BandObstacle::Polygon {
-        points: claude_polygon,
-        horizontal_padding: (BODY_LINE_HEIGHT * 0.28).round(),
-        vertical_padding: (BODY_LINE_HEIGHT * 0.12).round(),
-    };
-
-    let headline_prepared = engine.prepare_with_segments(
-        HEADLINE,
-        &headline_style(layout.headline_size),
-        &normal_options(),
-    );
-    let headline_obstacles = [openai_obstacle];
-    let (headline_lines, _) = layout_column(
-        engine,
-        &headline_prepared,
-        LayoutCursor::default(),
-        layout.headline_region,
-        layout.headline_line_height,
-        &headline_obstacles,
-        ColumnSide::Left,
-    );
-    let headline_rects = positioned_line_rects(&headline_lines, layout.headline_line_height);
-    let headline_bottom = headline_lines
+fn headline_metadata(
+    lines: &[Arc<PositionedLine>],
+    line_height: f32,
+    title_vertical_padding: f32,
+    fallback_top: f32,
+) -> (Vec<GeoRect>, f32, Option<DynamicVerticalSpan>) {
+    let rects = positioned_line_rects(lines, line_height);
+    let bottom = lines
         .iter()
-        .map(|line| line.y + layout.headline_line_height)
-        .fold(layout.headline_region.y, f32::max);
+        .map(|line| line.y + line_height)
+        .fold(fallback_top, f32::max);
+    let title_span = dynamic_rect_span(&rects, title_vertical_padding);
+    (rects, bottom, title_span)
+}
 
+fn cached_column_output_cursor(
+    column: &CachedDynamicColumn,
+    fallback_cursor: LayoutCursor,
+) -> LayoutCursor {
+    column
+        .bands
+        .last()
+        .map(|band| band.output_cursor)
+        .unwrap_or(fallback_cursor)
+}
+
+fn dynamic_scanline_span(scanlines: &PolygonBandCache) -> Option<DynamicVerticalSpan> {
+    scanlines
+        .vertical_span()
+        .map(|(top, bottom)| DynamicVerticalSpan { top, bottom })
+}
+
+fn dynamic_rect_span(rects: &[GeoRect], vertical_padding: f32) -> Option<DynamicVerticalSpan> {
+    let first = rects.first().copied()?;
+    let mut top = first.y - vertical_padding;
+    let mut bottom = first.bottom() + vertical_padding;
+    for rect in rects.iter().copied().skip(1) {
+        top = top.min(rect.y - vertical_padding);
+        bottom = bottom.max(rect.bottom() + vertical_padding);
+    }
+    Some(DynamicVerticalSpan { top, bottom })
+}
+
+fn dynamic_union_span(
+    left: Option<DynamicVerticalSpan>,
+    right: Option<DynamicVerticalSpan>,
+) -> Option<DynamicVerticalSpan> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(DynamicVerticalSpan {
+            top: left.top.min(right.top),
+            bottom: left.bottom.max(right.bottom),
+        }),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn dynamic_expand_span(
+    span: Option<DynamicVerticalSpan>,
+    vertical_padding: f32,
+) -> Option<DynamicVerticalSpan> {
+    span.map(|span| DynamicVerticalSpan {
+        top: span.top - vertical_padding,
+        bottom: span.bottom + vertical_padding,
+    })
+}
+
+fn dynamic_dirty_span(
+    current: Option<DynamicVerticalSpan>,
+    previous: Option<DynamicVerticalSpan>,
+    unchanged: bool,
+    vertical_padding: f32,
+) -> Option<DynamicVerticalSpan> {
+    if unchanged {
+        None
+    } else {
+        dynamic_union_span(
+            dynamic_expand_span(current, vertical_padding),
+            dynamic_expand_span(previous, vertical_padding),
+        )
+    }
+}
+
+fn dynamic_band_count(region: GeoRect, line_height: f32) -> usize {
+    (((region.bottom() - region.y) / line_height)
+        .floor()
+        .max(0.0)) as usize
+}
+
+fn dynamic_band_range_for_span(
+    region: GeoRect,
+    line_height: f32,
+    span: Option<DynamicVerticalSpan>,
+) -> Option<(usize, usize)> {
+    let span = span?;
+    if span.bottom <= region.y || span.top >= region.bottom() {
+        return None;
+    }
+
+    let band_count = dynamic_band_count(region, line_height);
+    if band_count == 0 {
+        return None;
+    }
+
+    let first = (((span.top - region.y) / line_height).floor() as isize - 1)
+        .clamp(0, band_count as isize - 1) as usize;
+    let last = (((span.bottom - region.y) / line_height).ceil() as isize - 1)
+        .clamp(0, band_count as isize - 1) as usize;
+    if first > last {
+        None
+    } else {
+        Some((first, last))
+    }
+}
+
+fn dynamic_union_band_range(
+    left: Option<(usize, usize)>,
+    right: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    match (left, right) {
+        (Some((left_start, left_end)), Some((right_start, right_end))) => {
+            Some((left_start.min(right_start), left_end.max(right_end)))
+        }
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn dynamic_plan_matches_region(
+    plan: &DynamicColumnPlan,
+    region: GeoRect,
+    line_height: f32,
+) -> bool {
+    let band_count = dynamic_band_count(region, line_height);
+    if plan.bands.len() != band_count {
+        return false;
+    }
+    if band_count == 0 {
+        return true;
+    }
+    let first_line_top_q = quantize_dynamic_value(region.y);
+    let last_line_top_q = quantize_dynamic_value(region.y + (band_count - 1) as f32 * line_height);
+    plan.bands
+        .first()
+        .zip(plan.bands.last())
+        .is_some_and(|(first, last)| {
+            first.signature.line_top_q == first_line_top_q
+                && last.signature.line_top_q == last_line_top_q
+        })
+}
+
+fn build_dynamic_column_plan(
+    region: GeoRect,
+    line_height: f32,
+    obstacles: &[BandObstacle<'_>],
+    side: ColumnSide,
+) -> DynamicColumnPlan {
+    let mut bands = Vec::new();
+    let mut scratch = DynamicBandScratch::default();
+    let mut line_top = region.y;
+    while line_top + line_height <= region.bottom() {
+        bands.push(build_dynamic_band_plan(
+            region,
+            bands.len(),
+            line_top,
+            line_height,
+            obstacles,
+            side,
+            &mut scratch,
+        ));
+        line_top += line_height;
+    }
+    DynamicColumnPlan { bands }
+}
+
+fn build_dynamic_column_plan_incremental(
+    region: GeoRect,
+    line_height: f32,
+    obstacles: &[BandObstacle<'_>],
+    side: ColumnSide,
+    cached: Option<DynamicColumnPlan>,
+    dirty_range: Option<(usize, usize)>,
+) -> DynamicColumnPlan {
+    let Some(mut cached) = cached else {
+        return build_dynamic_column_plan(region, line_height, obstacles, side);
+    };
+    if !dynamic_plan_matches_region(&cached, region, line_height) {
+        return build_dynamic_column_plan(region, line_height, obstacles, side);
+    }
+    let Some((dirty_start, dirty_end)) = dirty_range else {
+        return cached;
+    };
+    let mut scratch = DynamicBandScratch::default();
+
+    for band_index in dirty_start..=dirty_end {
+        let line_top = region.y + band_index as f32 * line_height;
+        cached.bands[band_index] = build_dynamic_band_plan(
+            region,
+            band_index,
+            line_top,
+            line_height,
+            obstacles,
+            side,
+            &mut scratch,
+        );
+    }
+    cached
+}
+
+fn build_dynamic_band_plan(
+    region: GeoRect,
+    band_index: usize,
+    line_top: f32,
+    line_height: f32,
+    obstacles: &[BandObstacle<'_>],
+    side: ColumnSide,
+    scratch: &mut DynamicBandScratch,
+) -> DynamicBandPlan {
+    let band_top = line_top;
+    let band_bottom = line_top + line_height;
+    scratch.blocked.clear();
+    for obstacle in obstacles {
+        append_obstacle_intervals(
+            &mut scratch.blocked,
+            obstacle,
+            band_index,
+            band_top,
+            band_bottom,
+        );
+    }
+
+    let slot = {
+        carve_text_line_slots_into(
+            Interval {
+                left: region.x,
+                right: region.right(),
+            },
+            &scratch.blocked,
+            &mut scratch.slots,
+            &mut scratch.scratch_slots,
+        );
+        if scratch.slots.is_empty() {
+            None
+        } else {
+            Some(choose_slot(&scratch.slots, side))
+        }
+    };
+
+    DynamicBandPlan {
+        line_top: line_top.round(),
+        signature: DynamicBandSignature {
+            line_top_q: quantize_dynamic_value(line_top),
+            slot: slot.map(|slot| DynamicBandIntervalKey {
+                left_bits: slot.left.to_bits(),
+                right_bits: slot.right.to_bits(),
+            }),
+        },
+        slot,
+    }
+}
+
+fn layout_dynamic_band(
+    engine: &PretextEngine,
+    prepared: &PreparedTextWithSegments,
+    input_cursor: LayoutCursor,
+    line_count_before: usize,
+    band: &DynamicBandPlan,
+) -> CachedDynamicBand {
+    let Some(slot) = band.slot else {
+        return CachedDynamicBand {
+            input_cursor,
+            signature: band.signature.clone(),
+            line_count_before,
+            line: None,
+            output_cursor: input_cursor,
+            exhausted_text: false,
+        };
+    };
+
+    let mut next_cursor = input_cursor;
+    let line = engine.layout_next_line_with_runs(
+        prepared,
+        &mut next_cursor,
+        (slot.right - slot.left).max(1.0),
+    );
+    let Some(line) = line else {
+        return CachedDynamicBand {
+            input_cursor,
+            signature: band.signature.clone(),
+            line_count_before,
+            line: None,
+            output_cursor: input_cursor,
+            exhausted_text: true,
+        };
+    };
+    if next_cursor == input_cursor {
+        return CachedDynamicBand {
+            input_cursor,
+            signature: band.signature.clone(),
+            line_count_before,
+            line: None,
+            output_cursor: input_cursor,
+            exhausted_text: true,
+        };
+    }
+
+    CachedDynamicBand {
+        input_cursor,
+        signature: band.signature.clone(),
+        line_count_before,
+        line: Some(Arc::new(PositionedLine {
+            x: slot.left.round(),
+            y: band.line_top,
+            width: line.line.width,
+            text: line.line.text,
+            visual_runs: line.runs.visual_runs,
+            glyph_runs: line.runs.glyph_runs,
+        })),
+        output_cursor: next_cursor,
+        exhausted_text: false,
+    }
+}
+
+fn compute_incremental_dynamic_column(
+    engine: &PretextEngine,
+    prepared: &PreparedTextWithSegments,
+    start_cursor: LayoutCursor,
+    plan: &DynamicColumnPlan,
+    cached: Option<CachedDynamicColumn>,
+    cached_lines: Option<Vec<Arc<PositionedLine>>>,
+) -> (
+    Vec<Arc<PositionedLine>>,
+    CachedDynamicColumn,
+    LayoutCursor,
+    DynamicColumnCacheStats,
+) {
+    let mut cursor = start_cursor;
+    let mut exhausted = false;
+    let mut lines = cached_lines.unwrap_or_default();
+    let mut bands = cached.map(|cached| cached.bands).unwrap_or_default();
+    if bands.len() > plan.bands.len() {
+        bands.truncate(plan.bands.len());
+    } else if bands.len() < plan.bands.len() {
+        bands.reserve(plan.bands.len() - bands.len());
+    }
+    let mut first_dirty = None;
+
+    for (band_index, band_plan) in plan.bands.iter().enumerate() {
+        let reused = if exhausted {
+            bands
+                .get(band_index)
+                .filter(|band| {
+                    band.input_cursor == cursor
+                        && band.signature == band_plan.signature
+                        && band.exhausted_text
+                })
+                .is_some()
+        } else {
+            bands.get(band_index).is_some_and(|band| {
+                band.input_cursor == cursor && band.signature == band_plan.signature
+            })
+        };
+        if reused {
+            if first_dirty.is_some() {
+                let band = &mut bands[band_index];
+                band.line_count_before = lines.len();
+                if let Some(line) = band.line.as_ref() {
+                    lines.push(Arc::clone(line));
+                }
+                cursor = band.output_cursor;
+                exhausted |= band.exhausted_text;
+            } else {
+                let band = &bands[band_index];
+                cursor = band.output_cursor;
+                exhausted |= band.exhausted_text;
+            }
+        } else {
+            if first_dirty.is_none() {
+                let line_count_before = bands
+                    .get(band_index)
+                    .map(|band| band.line_count_before)
+                    .unwrap_or(lines.len());
+                lines.truncate(line_count_before);
+                first_dirty = Some(band_index);
+            }
+            let next_band = if exhausted {
+                CachedDynamicBand {
+                    input_cursor: cursor,
+                    signature: band_plan.signature.clone(),
+                    line_count_before: lines.len(),
+                    line: None,
+                    output_cursor: cursor,
+                    exhausted_text: true,
+                }
+            } else {
+                layout_dynamic_band(engine, prepared, cursor, lines.len(), band_plan)
+            };
+            if band_index < bands.len() {
+                bands[band_index] = next_band;
+            } else {
+                bands.push(next_band);
+            }
+            let band = &bands[band_index];
+            if let Some(line) = band.line.as_ref() {
+                lines.push(Arc::clone(line));
+            }
+            cursor = band.output_cursor;
+            exhausted |= band.exhausted_text;
+        }
+    }
+
+    let stats = first_dirty.map_or(DynamicColumnCacheStats::default(), |first_dirty| {
+        DynamicColumnCacheStats {
+            dirty_bands: plan.bands.len().saturating_sub(first_dirty),
+            full_recomputes: usize::from(first_dirty == 0),
+        }
+    });
+
+    (lines, CachedDynamicColumn { bands }, cursor, stats)
+}
+
+fn compute_credit_line(
+    engine: &PretextEngine,
+    credit_prepared: &PreparedTextWithSegments,
+    credit_width: f32,
+    layout: PageLayout,
+    headline_bottom: f32,
+    obstacles: &[BandObstacle<'_>],
+) -> Option<PositionedLine> {
     let credit_top = headline_bottom + layout.credit_gap;
     let credit_region = GeoRect {
         x: layout.page.x + layout.gutter + 4.0,
@@ -814,45 +1612,242 @@ fn evaluate_layout(
         width: layout.headline_region.width,
         height: CREDIT_LINE_HEIGHT,
     };
-    let mut credit_blocked =
-        get_obstacle_intervals(&openai_obstacle, credit_region.y, credit_region.bottom());
-    if layout.is_narrow {
-        credit_blocked.extend(get_obstacle_intervals(
-            &claude_obstacle,
+    let mut scratch = DynamicBandScratch::default();
+    for obstacle in obstacles {
+        append_obstacle_intervals(
+            &mut scratch.blocked,
+            obstacle,
+            0,
             credit_region.y,
             credit_region.bottom(),
-        ));
+        );
     }
-    let credit_slots = carve_text_line_slots(
+    carve_text_line_slots_into(
         Interval {
             left: credit_region.x,
             right: credit_region.right(),
         },
-        &credit_blocked,
+        &scratch.blocked,
+        &mut scratch.slots,
+        &mut scratch.scratch_slots,
     );
-    let credit_width = measure_single_line_width(engine, credit_prepared).ceil();
-    let credit_left = credit_slots
+    let credit_left = scratch
+        .slots
         .iter()
         .find(|slot| slot.right - slot.left >= credit_width)
         .map(|slot| slot.left.round())
         .unwrap_or(credit_region.x.round());
     let mut credit_cursor = LayoutCursor::default();
-    let credit_line = engine
-        .layout_next_line(credit_prepared, &mut credit_cursor, UNBOUNDED_WIDTH)
-        .map(|line| {
-            let visual_runs = engine.line_visual_runs(credit_prepared, &line);
-            let glyph_runs = engine.line_glyph_runs(credit_prepared, &line);
-            PositionedLine {
-                x: credit_left,
-                y: credit_top.round(),
-                width: line.width,
-                text: line.text,
-                visual_runs,
-                glyph_runs,
-            }
-        });
+    engine
+        .layout_next_line_with_runs(credit_prepared, &mut credit_cursor, UNBOUNDED_WIDTH)
+        .map(|line| PositionedLine {
+            x: credit_left,
+            y: credit_top.round(),
+            width: line.line.width,
+            text: line.line.text,
+            visual_runs: line.runs.visual_runs,
+            glyph_runs: line.runs.glyph_runs,
+        })
+}
 
-    let copy_top = credit_top + CREDIT_LINE_HEIGHT + layout.copy_gap;
+fn compute_dynamic_projection(
+    engine: &PretextEngine,
+    body_prepared: &PreparedTextWithSegments,
+    headline_prepared: &PreparedTextWithSegments,
+    credit_prepared: &PreparedTextWithSegments,
+    credit_width: f32,
+    layout: PageLayout,
+    openai_scanlines: &PolygonBandCache,
+    claude_scanlines: &PolygonBandCache,
+    key: DynamicProjectionKey,
+    cached: Option<CachedDynamicProjection>,
+) -> (CachedDynamicProjection, DynamicProjectionCacheStats) {
+    let openai_vertical_padding = (BODY_LINE_HEIGHT * 0.26).round();
+    let claude_vertical_padding = (BODY_LINE_HEIGHT * 0.12).round();
+    let openai_obstacle = BandObstacle::Polygon {
+        scanlines: openai_scanlines,
+        horizontal_padding: (BODY_LINE_HEIGHT * 0.82).round(),
+        vertical_padding: openai_vertical_padding,
+    };
+    let claude_obstacle = BandObstacle::Polygon {
+        scanlines: claude_scanlines,
+        horizontal_padding: (BODY_LINE_HEIGHT * 0.28).round(),
+        vertical_padding: claude_vertical_padding,
+    };
+    let openai_span = dynamic_scanline_span(openai_scanlines);
+    let claude_span = dynamic_scanline_span(claude_scanlines);
+    let cached_openai_span = cached.as_ref().and_then(|cached| cached.openai_span);
+    let cached_claude_span = cached.as_ref().and_then(|cached| cached.claude_span);
+    let cached_headline_title_span = cached
+        .as_ref()
+        .and_then(|cached| cached.headline_title_span);
+    let openai_bucket_unchanged = cached
+        .as_ref()
+        .is_some_and(|cached| cached.key.openai_angle_q == key.openai_angle_q);
+    let claude_bucket_unchanged = cached
+        .as_ref()
+        .is_some_and(|cached| cached.key.claude_angle_q == key.claude_angle_q);
+    let mut cached_headline_lines = None;
+    let mut cached_credit_line = None;
+    let mut cached_left_lines = None;
+    let mut cached_right_lines = None;
+    let mut cached_headline_plan = None;
+    let mut cached_headline_column = None;
+    let mut cached_headline_title_bands = None;
+    let mut cached_headline_bottom = None;
+    let mut cached_primary_body_plan = None;
+    let mut cached_primary_body_column = None;
+    let mut cached_secondary_body_plan = None;
+    let mut cached_secondary_body_column = None;
+    if let Some(cached) = cached {
+        let CachedDynamicProjection {
+            projection:
+                DynamicProjection {
+                    headline_lines,
+                    credit_line,
+                    left_lines,
+                    right_lines,
+                },
+            headline_plan,
+            headline_column,
+            headline_title_bands,
+            headline_bottom,
+            headline_title_span: _,
+            primary_body_plan,
+            primary_body_column,
+            secondary_body_plan,
+            secondary_body_column,
+            ..
+        } = cached;
+        cached_headline_lines = Some(headline_lines);
+        cached_credit_line = credit_line;
+        cached_left_lines = Some(left_lines);
+        cached_right_lines = Some(right_lines);
+        cached_headline_plan = Some(headline_plan);
+        cached_headline_column = Some(headline_column);
+        cached_headline_title_bands = Some(headline_title_bands);
+        cached_headline_bottom = Some(headline_bottom);
+        cached_primary_body_plan = Some(primary_body_plan);
+        cached_primary_body_column = Some(primary_body_column);
+        cached_secondary_body_plan = secondary_body_plan;
+        cached_secondary_body_column = secondary_body_column;
+    }
+    let title_vertical_padding = (BODY_LINE_HEIGHT * 0.3).round();
+    let title_horizontal_padding = (BODY_LINE_HEIGHT * 0.95).round();
+    let right_region = GeoRect {
+        x: layout.page.x + layout.gutter + layout.column_width + layout.center_gap,
+        y: layout.headline_region.y,
+        width: layout.column_width,
+        height: (layout.page.bottom() - layout.headline_region.y - layout.gutter).max(0.0),
+    };
+
+    let (
+        headline_lines,
+        headline_plan,
+        headline_column,
+        headline_title_bands,
+        headline_bottom,
+        headline_title_span,
+        headline_stats,
+    ) = if openai_bucket_unchanged {
+        (
+            cached_headline_lines
+                .take()
+                .expect("cached headline lines should exist when openai bucket is unchanged"),
+            cached_headline_plan
+                .take()
+                .expect("cached headline plan should exist when openai bucket is unchanged"),
+            cached_headline_column
+                .take()
+                .expect("cached headline column should exist when openai bucket is unchanged"),
+            cached_headline_title_bands
+                .take()
+                .expect("cached headline title bands should exist when openai bucket is unchanged"),
+            cached_headline_bottom
+                .expect("cached headline bottom should exist when openai bucket is unchanged"),
+            cached_headline_title_span,
+            DynamicColumnCacheStats::default(),
+        )
+    } else {
+        let headline_obstacles = [openai_obstacle];
+        let headline_dirty_range = dynamic_band_range_for_span(
+            layout.headline_region,
+            layout.headline_line_height,
+            dynamic_dirty_span(
+                openai_span,
+                cached_openai_span,
+                openai_bucket_unchanged,
+                openai_vertical_padding,
+            ),
+        );
+        let headline_plan = build_dynamic_column_plan_incremental(
+            layout.headline_region,
+            layout.headline_line_height,
+            &headline_obstacles,
+            ColumnSide::Left,
+            cached_headline_plan.take(),
+            headline_dirty_range,
+        );
+        let (headline_lines, headline_column, _, headline_stats) =
+            compute_incremental_dynamic_column(
+                engine,
+                headline_prepared,
+                LayoutCursor::default(),
+                &headline_plan,
+                cached_headline_column.take(),
+                cached_headline_lines.take(),
+            );
+        let (headline_rects, headline_bottom, headline_title_span) = headline_metadata(
+            &headline_lines,
+            layout.headline_line_height,
+            title_vertical_padding,
+            layout.headline_region.y,
+        );
+        let headline_title_bands = if layout.is_narrow {
+            Arc::<[Vec<Interval>]>::from(Vec::<Vec<Interval>>::new())
+        } else {
+            build_rect_band_interval_cache(
+                &headline_rects,
+                right_region,
+                BODY_LINE_HEIGHT,
+                title_horizontal_padding,
+                title_vertical_padding,
+            )
+        };
+        (
+            headline_lines,
+            headline_plan,
+            headline_column,
+            headline_title_bands,
+            headline_bottom,
+            headline_title_span,
+            headline_stats,
+        )
+    };
+
+    let credit_line = if !layout.is_narrow && openai_bucket_unchanged {
+        cached_credit_line
+    } else if layout.is_narrow {
+        compute_credit_line(
+            engine,
+            credit_prepared,
+            credit_width,
+            layout,
+            headline_bottom,
+            &[openai_obstacle, claude_obstacle],
+        )
+    } else {
+        compute_credit_line(
+            engine,
+            credit_prepared,
+            credit_width,
+            layout,
+            headline_bottom,
+            &[openai_obstacle],
+        )
+    };
+
+    let copy_top = headline_bottom + layout.credit_gap + CREDIT_LINE_HEIGHT + layout.copy_gap;
     if layout.is_narrow {
         let body_region = GeoRect {
             x: (layout.page.x + (layout.page.width - layout.column_width) * 0.5).round(),
@@ -861,21 +1856,72 @@ fn evaluate_layout(
             height: (layout.page.bottom() - copy_top - layout.gutter).max(0.0),
         };
         let body_obstacles = [claude_obstacle, openai_obstacle];
-        let (left_lines, _) = layout_column(
-            engine,
-            body_prepared,
-            LayoutCursor::default(),
+        let body_dirty_range = dynamic_union_band_range(
+            dynamic_band_range_for_span(
+                body_region,
+                BODY_LINE_HEIGHT,
+                dynamic_dirty_span(
+                    openai_span,
+                    cached_openai_span,
+                    openai_bucket_unchanged,
+                    openai_vertical_padding,
+                ),
+            ),
+            dynamic_band_range_for_span(
+                body_region,
+                BODY_LINE_HEIGHT,
+                dynamic_dirty_span(
+                    claude_span,
+                    cached_claude_span,
+                    claude_bucket_unchanged,
+                    claude_vertical_padding,
+                ),
+            ),
+        );
+        let body_plan = build_dynamic_column_plan_incremental(
             body_region,
             BODY_LINE_HEIGHT,
             &body_obstacles,
             ColumnSide::Left,
+            cached_primary_body_plan.take(),
+            body_dirty_range,
         );
-        return DynamicProjection {
-            headline_lines,
-            credit_line,
-            left_lines,
-            right_lines: Vec::new(),
+        let (left_lines, primary_body_column, _, body_stats) = compute_incremental_dynamic_column(
+            engine,
+            body_prepared,
+            LayoutCursor::default(),
+            &body_plan,
+            cached_primary_body_column.take(),
+            cached_left_lines.take(),
+        );
+        let projection = CachedDynamicProjection {
+            key,
+            projection: DynamicProjection {
+                headline_lines,
+                credit_line,
+                left_lines,
+                right_lines: Vec::new(),
+            },
+            headline_plan,
+            headline_column,
+            headline_title_bands,
+            headline_bottom,
+            headline_title_span,
+            primary_body_plan: body_plan,
+            primary_body_column,
+            secondary_body_plan: None,
+            secondary_body_column: None,
+            openai_span,
+            claude_span,
         };
+        return (
+            projection,
+            DynamicProjectionCacheStats {
+                dirty_bands: headline_stats.dirty_bands + body_stats.dirty_bands,
+                full_recomputes: headline_stats.full_recomputes + body_stats.full_recomputes,
+                ..DynamicProjectionCacheStats::default()
+            },
+        );
     }
 
     let left_region = GeoRect {
@@ -884,45 +1930,145 @@ fn evaluate_layout(
         width: layout.column_width,
         height: (layout.page.bottom() - copy_top - layout.gutter).max(0.0),
     };
-    let right_region = GeoRect {
-        x: layout.page.x + layout.gutter + layout.column_width + layout.center_gap,
-        y: layout.headline_region.y,
-        width: layout.column_width,
-        height: (layout.page.bottom() - layout.headline_region.y - layout.gutter).max(0.0),
-    };
-    let title_obstacle = BandObstacle::Rects {
-        rects: &headline_rects,
-        horizontal_padding: (BODY_LINE_HEIGHT * 0.95).round(),
-        vertical_padding: (BODY_LINE_HEIGHT * 0.3).round(),
+    let title_obstacle = BandObstacle::BandIntervals {
+        bands: headline_title_bands.as_ref(),
     };
 
-    let left_obstacles = [openai_obstacle];
-    let (left_lines, cursor) = layout_column(
-        engine,
-        body_prepared,
-        LayoutCursor::default(),
-        left_region,
-        BODY_LINE_HEIGHT,
-        &left_obstacles,
-        ColumnSide::Left,
-    );
+    let (left_lines, left_plan, primary_body_column, cursor, left_stats) =
+        if openai_bucket_unchanged {
+            let primary_body_column = cached_primary_body_column
+                .take()
+                .expect("cached primary body column should exist when openai bucket is unchanged");
+            let cursor = cached_column_output_cursor(&primary_body_column, LayoutCursor::default());
+            (
+                cached_left_lines
+                    .take()
+                    .expect("cached left lines should exist when openai bucket is unchanged"),
+                cached_primary_body_plan.take().expect(
+                    "cached primary body plan should exist when openai bucket is unchanged",
+                ),
+                primary_body_column,
+                cursor,
+                DynamicColumnCacheStats::default(),
+            )
+        } else {
+            let left_obstacles = [openai_obstacle];
+            let left_dirty_range = dynamic_band_range_for_span(
+                left_region,
+                BODY_LINE_HEIGHT,
+                dynamic_dirty_span(
+                    openai_span,
+                    cached_openai_span,
+                    openai_bucket_unchanged,
+                    openai_vertical_padding,
+                ),
+            );
+            let left_plan = build_dynamic_column_plan_incremental(
+                left_region,
+                BODY_LINE_HEIGHT,
+                &left_obstacles,
+                ColumnSide::Left,
+                cached_primary_body_plan.take(),
+                left_dirty_range,
+            );
+            let (left_lines, primary_body_column, cursor, left_stats) =
+                compute_incremental_dynamic_column(
+                    engine,
+                    body_prepared,
+                    LayoutCursor::default(),
+                    &left_plan,
+                    cached_primary_body_column.take(),
+                    cached_left_lines.take(),
+                );
+            (
+                left_lines,
+                left_plan,
+                primary_body_column,
+                cursor,
+                left_stats,
+            )
+        };
     let right_obstacles = [title_obstacle, claude_obstacle, openai_obstacle];
-    let (right_lines, _) = layout_column(
-        engine,
-        body_prepared,
-        cursor,
+    let title_dirty_range = dynamic_band_range_for_span(
+        right_region,
+        BODY_LINE_HEIGHT,
+        if openai_bucket_unchanged {
+            None
+        } else {
+            dynamic_union_span(headline_title_span, cached_headline_title_span)
+        },
+    );
+    let right_logo_dirty_range = dynamic_union_band_range(
+        dynamic_band_range_for_span(
+            right_region,
+            BODY_LINE_HEIGHT,
+            dynamic_dirty_span(
+                openai_span,
+                cached_openai_span,
+                openai_bucket_unchanged,
+                openai_vertical_padding,
+            ),
+        ),
+        dynamic_band_range_for_span(
+            right_region,
+            BODY_LINE_HEIGHT,
+            dynamic_dirty_span(
+                claude_span,
+                cached_claude_span,
+                claude_bucket_unchanged,
+                claude_vertical_padding,
+            ),
+        ),
+    );
+    let right_plan = build_dynamic_column_plan_incremental(
         right_region,
         BODY_LINE_HEIGHT,
         &right_obstacles,
         ColumnSide::Right,
+        cached_secondary_body_plan.take(),
+        dynamic_union_band_range(title_dirty_range, right_logo_dirty_range),
+    );
+    let (right_lines, secondary_body_column, _, right_stats) = compute_incremental_dynamic_column(
+        engine,
+        body_prepared,
+        cursor,
+        &right_plan,
+        cached_secondary_body_column.take(),
+        cached_right_lines.take(),
     );
 
-    DynamicProjection {
-        headline_lines,
-        credit_line,
-        left_lines,
-        right_lines,
-    }
+    let projection = CachedDynamicProjection {
+        key,
+        projection: DynamicProjection {
+            headline_lines,
+            credit_line,
+            left_lines,
+            right_lines,
+        },
+        headline_plan,
+        headline_column,
+        headline_title_bands,
+        headline_bottom,
+        headline_title_span,
+        primary_body_plan: left_plan,
+        primary_body_column,
+        secondary_body_plan: Some(right_plan),
+        secondary_body_column: Some(secondary_body_column),
+        openai_span,
+        claude_span,
+    };
+    (
+        projection,
+        DynamicProjectionCacheStats {
+            dirty_bands: headline_stats.dirty_bands
+                + left_stats.dirty_bands
+                + right_stats.dirty_bands,
+            full_recomputes: headline_stats.full_recomputes
+                + left_stats.full_recomputes
+                + right_stats.full_recomputes,
+            ..DynamicProjectionCacheStats::default()
+        },
+    )
 }
 
 fn paint_page_background(painter: &egui::Painter, page_rect: Rect) {
@@ -982,36 +2128,70 @@ fn paint_page_background(painter: &egui::Painter, page_rect: Rect) {
     );
 }
 
-fn paint_positioned_lines(
-    painter: &egui::Painter,
-    lines: &[PositionedLine],
+fn cached_logo_geometry(
+    cache: &mut Option<CachedLogoGeometry>,
+    layout_key: DynamicLayoutKey,
+    points: &[Point],
+    rect: GeoRect,
+    angle: f32,
+) -> TransformedLogoGeometry {
+    let polygon = transform_points(points, rect, angle);
+    let angle_q = quantize_dynamic_reflow_angle(rect, angle);
+    let key = DynamicLogoGeometryKey {
+        layout_key,
+        angle_q,
+    };
+    if cache.as_ref().is_none_or(|cached| cached.key != key) {
+        let reflow_angle = snapped_dynamic_reflow_angle(rect, angle_q);
+        let reflow_polygon = transform_points(points, rect, reflow_angle);
+        *cache = Some(CachedLogoGeometry {
+            key,
+            scanlines: Arc::new(PolygonBandCache::new(&reflow_polygon)),
+        });
+    }
+    let scanlines = cache
+        .as_ref()
+        .expect("dynamic logo geometry cache should exist")
+        .scanlines
+        .clone();
+    TransformedLogoGeometry { polygon, scanlines }
+}
+
+fn fragment_paint_options(
     style: &pretext::TextStyleSpec,
     line_height: f32,
-    _slack_y: f32,
     color: Color32,
+) -> PretextFragmentPaintOptions<'_> {
+    PretextFragmentPaintOptions::new(style, line_height)
+        .color(color)
+        .fallback_font(egui::FontId::new(
+            style.size_px,
+            egui::FontFamily::Proportional,
+        ))
+        .fallback_align(egui::Align2::LEFT_TOP)
+}
+
+fn queue_positioned_lines<'a>(
+    fragment_painter: &mut PretextFragmentPainter,
+    lines: impl IntoIterator<Item = &'a PositionedLine>,
+    options: &PretextFragmentPaintOptions<'_>,
     ctx: &egui::Context,
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
     for line in lines {
-        paint_glyph_runs(
-            painter,
+        fragment_painter.push_fragment(
             line.x,
             line.y,
             &line.text,
             &line.glyph_runs,
-            style,
-            line_height,
-            color,
+            &[],
+            options,
             ctx,
             engine,
             assets,
         );
     }
-}
-
-fn headline_render_slack_y(font_size: f32, line_height: f32) -> f32 {
-    ((font_size - line_height).max(0.0) + 8.0).round()
 }
 
 fn paint_logo_shadow(painter: &egui::Painter, rect: GeoRect, offset: egui::Vec2, color: Color32) {
@@ -1170,6 +2350,27 @@ mod tests {
     }
 
     #[test]
+    fn dirty_span_skips_unchanged_obstacles_and_unions_changed_geometry() {
+        let current = Some(DynamicVerticalSpan {
+            top: 100.0,
+            bottom: 180.0,
+        });
+        let previous = Some(DynamicVerticalSpan {
+            top: 92.0,
+            bottom: 164.0,
+        });
+
+        assert_eq!(dynamic_dirty_span(current, previous, true, 12.0), None);
+        assert_eq!(
+            dynamic_dirty_span(current, previous, false, 12.0),
+            Some(DynamicVerticalSpan {
+                top: 80.0,
+                bottom: 192.0,
+            })
+        );
+    }
+
+    #[test]
     fn lines_route_around_obstacle_rect() {
         let engine = PretextEngine::with_font_data_and_system_fonts(
             AssetRegistry::bundled_font_data(),
@@ -1213,6 +2414,152 @@ mod tests {
             .collect();
         assert!(!overlapping.is_empty());
         assert!(overlapping.iter().all(|line| line.x >= obstacle.right()));
+    }
+
+    #[test]
+    fn band_interval_cache_matches_rect_obstacle_layout() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let prepared = engine.prepare_with_segments(
+            "This paragraph should be forced to route around an obstacle in the middle of the column so the first few lines shift to the right before the flow returns to the left edge.",
+            &body_style(),
+            &normal_options(),
+        );
+        let region = GeoRect {
+            x: 20.0,
+            y: 20.0,
+            width: 260.0,
+            height: 220.0,
+        };
+        let obstacle = GeoRect {
+            x: 20.0,
+            y: 20.0,
+            width: 120.0,
+            height: 86.0,
+        };
+        let horizontal_padding = (BODY_LINE_HEIGHT * 0.72).round();
+        let vertical_padding = (BODY_LINE_HEIGHT * 0.12).round();
+        let rect_obstacles = [BandObstacle::Rects {
+            rects: std::slice::from_ref(&obstacle),
+            horizontal_padding,
+            vertical_padding,
+        }];
+        let band_cache = build_rect_band_interval_cache(
+            std::slice::from_ref(&obstacle),
+            region,
+            BODY_LINE_HEIGHT,
+            horizontal_padding,
+            vertical_padding,
+        );
+        let cached_obstacles = [BandObstacle::BandIntervals {
+            bands: band_cache.as_ref(),
+        }];
+
+        let (rect_lines, rect_cursor) = layout_column(
+            &engine,
+            &prepared,
+            LayoutCursor::default(),
+            region,
+            BODY_LINE_HEIGHT,
+            &rect_obstacles,
+            ColumnSide::Left,
+        );
+        let (cached_lines, cached_cursor) = layout_column(
+            &engine,
+            &prepared,
+            LayoutCursor::default(),
+            region,
+            BODY_LINE_HEIGHT,
+            &cached_obstacles,
+            ColumnSide::Left,
+        );
+
+        assert_eq!(cached_lines, rect_lines);
+        assert_eq!(cached_cursor, rect_cursor);
+    }
+
+    #[test]
+    fn incremental_column_matches_fresh_after_dirty_suffix_with_skipped_band_prefix() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let prepared = engine.prepare_with_segments(
+            "This paragraph is long enough to fill several bands so we can move a fully blocking obstacle farther down the column and verify that incremental rebuilding truncates output lines at the right visible prefix instead of using the raw band index.",
+            &body_style(),
+            &normal_options(),
+        );
+        let region = GeoRect {
+            x: 20.0,
+            y: 20.0,
+            width: 260.0,
+            height: BODY_LINE_HEIGHT * 8.0,
+        };
+        let full_width_band_rect = |band_index: usize| GeoRect {
+            x: region.x,
+            y: region.y + BODY_LINE_HEIGHT * band_index as f32,
+            width: region.width,
+            height: BODY_LINE_HEIGHT,
+        };
+        let static_block = full_width_band_rect(1);
+        let initial_moving_block = full_width_band_rect(3);
+        let next_moving_block = full_width_band_rect(4);
+        let initial_rects = [static_block, initial_moving_block];
+        let next_rects = [static_block, next_moving_block];
+        let horizontal_padding = 0.0;
+        let vertical_padding = 0.0;
+        let initial_obstacles = [BandObstacle::Rects {
+            rects: &initial_rects,
+            horizontal_padding,
+            vertical_padding,
+        }];
+        let next_obstacles = [BandObstacle::Rects {
+            rects: &next_rects,
+            horizontal_padding,
+            vertical_padding,
+        }];
+
+        let initial_plan = build_dynamic_column_plan(
+            region,
+            BODY_LINE_HEIGHT,
+            &initial_obstacles,
+            ColumnSide::Left,
+        );
+        let (initial_lines, initial_column, _, _) = compute_incremental_dynamic_column(
+            &engine,
+            &prepared,
+            LayoutCursor::default(),
+            &initial_plan,
+            None,
+            None,
+        );
+        let next_plan =
+            build_dynamic_column_plan(region, BODY_LINE_HEIGHT, &next_obstacles, ColumnSide::Left);
+        let (incremental_lines, _, incremental_cursor, _) = compute_incremental_dynamic_column(
+            &engine,
+            &prepared,
+            LayoutCursor::default(),
+            &next_plan,
+            Some(initial_column),
+            Some(initial_lines.clone()),
+        );
+        let (fresh_lines, _, fresh_cursor, _) = compute_incremental_dynamic_column(
+            &engine,
+            &prepared,
+            LayoutCursor::default(),
+            &next_plan,
+            None,
+            None,
+        );
+
+        assert_eq!(incremental_lines, fresh_lines);
+        assert_eq!(incremental_cursor, fresh_cursor);
+        assert!(initial_lines.len() >= 2);
+        assert!(incremental_lines.len() >= 2);
+        assert!(Arc::ptr_eq(&initial_lines[0], &incremental_lines[0]));
+        assert!(Arc::ptr_eq(&initial_lines[1], &incremental_lines[1]));
     }
 
     #[test]
@@ -1273,5 +2620,365 @@ mod tests {
 
         assert!(size >= 22.0);
         assert!(!headline_breaks_inside_word(&engine, &prepared, 620.0));
+    }
+
+    #[test]
+    fn projection_reuses_cached_headline_prepare_across_angle_updates() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut demo = DynamicLayoutDemo::default();
+        let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
+
+        demo.invalidate_engine_caches_if_needed(&engine);
+        let layout = demo.ensure_layout(page_rect, &engine);
+        let (openai_geometry, claude_geometry) = demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry.scanlines.as_ref(),
+            claude_geometry.scanlines.as_ref(),
+        );
+        let after_first = engine.runtime_stats();
+
+        demo.openai_logo.angle = 0.01;
+        let (openai_geometry, claude_geometry) = demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry.scanlines.as_ref(),
+            claude_geometry.scanlines.as_ref(),
+        );
+        let after_second = engine.runtime_stats();
+
+        assert_eq!(
+            after_second.prepare_with_segments_calls,
+            after_first.prepare_with_segments_calls
+        );
+    }
+
+    #[test]
+    fn projection_reuses_cached_geometry_within_reflow_bucket() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut demo = DynamicLayoutDemo::default();
+        let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
+
+        demo.invalidate_engine_caches_if_needed(&engine);
+        let layout = demo.ensure_layout(page_rect, &engine);
+        let (openai_geometry, claude_geometry) = demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry.scanlines.as_ref(),
+            claude_geometry.scanlines.as_ref(),
+        );
+        let after_first = engine.runtime_stats();
+
+        demo.openai_logo.angle = dynamic_reflow_bucket_angle(layout.openai_rect) * 0.4;
+        let (openai_geometry_next, claude_geometry_next) =
+            demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry_next.scanlines.as_ref(),
+            claude_geometry_next.scanlines.as_ref(),
+        );
+        let after_second = engine.runtime_stats();
+
+        assert!(Arc::ptr_eq(
+            &openai_geometry.scanlines,
+            &openai_geometry_next.scanlines
+        ));
+        assert_eq!(
+            after_second.layout_next_line_with_runs_calls,
+            after_first.layout_next_line_with_runs_calls
+        );
+    }
+
+    #[test]
+    fn projection_reflows_only_dirty_suffix_across_bucket_change() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut demo = DynamicLayoutDemo::default();
+        let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
+
+        demo.invalidate_engine_caches_if_needed(&engine);
+        let layout = demo.ensure_layout(page_rect, &engine);
+        let (openai_geometry, claude_geometry) = demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry.scanlines.as_ref(),
+            claude_geometry.scanlines.as_ref(),
+        );
+        let after_first = engine.runtime_stats();
+
+        demo.openai_logo.angle = dynamic_reflow_bucket_angle(layout.openai_rect) * 1.2;
+        let (openai_geometry_next, claude_geometry_next) =
+            demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry_next.scanlines.as_ref(),
+            claude_geometry_next.scanlines.as_ref(),
+        );
+        let after_second = engine.runtime_stats();
+
+        let second_frame_calls = after_second
+            .layout_next_line_with_runs_calls
+            .saturating_sub(after_first.layout_next_line_with_runs_calls);
+        assert!(second_frame_calls > 0);
+        assert!(second_frame_calls < after_first.layout_next_line_with_runs_calls);
+    }
+
+    #[test]
+    fn projection_reuses_headline_credit_and_left_column_when_only_claude_changes() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut demo = DynamicLayoutDemo::default();
+        let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
+
+        demo.invalidate_engine_caches_if_needed(&engine);
+        let layout = demo.ensure_layout(page_rect, &engine);
+        let (openai_geometry, claude_geometry) = demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry.scanlines.as_ref(),
+            claude_geometry.scanlines.as_ref(),
+        );
+
+        let baseline_headline = demo
+            .projection_cache
+            .as_ref()
+            .expect("baseline projection cache")
+            .projection
+            .headline_lines
+            .clone();
+        let baseline_left = demo
+            .projection_cache
+            .as_ref()
+            .expect("baseline projection cache")
+            .projection
+            .left_lines
+            .clone();
+        let baseline_credit = demo
+            .projection_cache
+            .as_ref()
+            .expect("baseline projection cache")
+            .projection
+            .credit_line
+            .clone();
+        let after_first = engine.runtime_stats();
+
+        demo.claude_logo.angle = dynamic_reflow_bucket_angle(layout.claude_rect) * 1.2;
+        let (openai_geometry_next, claude_geometry_next) =
+            demo.frame_logo_geometries(&engine, layout);
+        let _ = demo.ensure_projection(
+            &engine,
+            layout,
+            openai_geometry_next.scanlines.as_ref(),
+            claude_geometry_next.scanlines.as_ref(),
+        );
+        let after_second = engine.runtime_stats();
+        let next_cache = demo
+            .projection_cache
+            .as_ref()
+            .expect("updated projection cache");
+
+        assert!(Arc::ptr_eq(
+            &openai_geometry.scanlines,
+            &openai_geometry_next.scanlines
+        ));
+        assert_eq!(baseline_credit, next_cache.projection.credit_line);
+        assert_eq!(
+            baseline_headline.len(),
+            next_cache.projection.headline_lines.len()
+        );
+        assert_eq!(baseline_left.len(), next_cache.projection.left_lines.len());
+        assert!(baseline_headline
+            .iter()
+            .zip(&next_cache.projection.headline_lines)
+            .all(|(left, right)| Arc::ptr_eq(left, right)));
+        assert!(baseline_left
+            .iter()
+            .zip(&next_cache.projection.left_lines)
+            .all(|(left, right)| Arc::ptr_eq(left, right)));
+
+        let second_frame_calls = after_second
+            .layout_next_line_with_runs_calls
+            .saturating_sub(after_first.layout_next_line_with_runs_calls);
+        assert!(second_frame_calls > 0);
+        assert!(second_frame_calls < after_first.layout_next_line_with_runs_calls);
+    }
+
+    fn line_signature(line: &PositionedLine) -> (i32, i32, i32, String) {
+        (
+            line.x.round() as i32,
+            line.y.round() as i32,
+            line.width.round() as i32,
+            line.text.clone(),
+        )
+    }
+
+    fn first_line_diff<T, U>(
+        left: &[T],
+        right: &[U],
+    ) -> Option<(
+        usize,
+        Option<(i32, i32, i32, String)>,
+        Option<(i32, i32, i32, String)>,
+    )>
+    where
+        T: AsRef<PositionedLine>,
+        U: AsRef<PositionedLine>,
+    {
+        let shared = left.len().min(right.len());
+        for index in 0..shared {
+            if left[index].as_ref() != right[index].as_ref() {
+                return Some((
+                    index,
+                    Some(line_signature(left[index].as_ref())),
+                    Some(line_signature(right[index].as_ref())),
+                ));
+            }
+        }
+        if left.len() == right.len() {
+            None
+        } else {
+            Some((
+                shared,
+                left.get(shared).map(|line| line_signature(line.as_ref())),
+                right.get(shared).map(|line| line_signature(line.as_ref())),
+            ))
+        }
+    }
+
+    #[test]
+    fn incremental_plan_build_matches_fresh_projection_after_bucket_change() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut demo = DynamicLayoutDemo::default();
+        let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
+
+        demo.invalidate_engine_caches_if_needed(&engine);
+        let layout = demo.ensure_layout(page_rect, &engine);
+        demo.ensure_body_prepared(&engine);
+        demo.ensure_headline_prepared(&engine, layout.headline_size);
+        demo.ensure_credit_prepared(&engine);
+        let credit_width = demo.ensure_credit_width(&engine);
+        let layout_key = demo.current_layout_key(&engine, layout);
+
+        let (openai_geometry, claude_geometry) = demo.frame_logo_geometries(&engine, layout);
+        let key = DynamicProjectionKey {
+            layout_key,
+            openai_angle_q: quantize_dynamic_reflow_angle(
+                layout.openai_rect,
+                demo.openai_logo.angle,
+            ),
+            claude_angle_q: quantize_dynamic_reflow_angle(
+                layout.claude_rect,
+                demo.claude_logo.angle,
+            ),
+        };
+        let baseline = compute_dynamic_projection(
+            &engine,
+            demo.body_prepared.as_ref().unwrap(),
+            demo.headline_prepared.as_ref().unwrap(),
+            demo.credit_prepared.as_ref().unwrap(),
+            credit_width,
+            layout,
+            openai_geometry.scanlines.as_ref(),
+            claude_geometry.scanlines.as_ref(),
+            key,
+            None,
+        )
+        .0;
+
+        demo.openai_logo.angle = dynamic_reflow_bucket_angle(layout.openai_rect) * 1.2;
+        let (openai_geometry_next, claude_geometry_next) =
+            demo.frame_logo_geometries(&engine, layout);
+        let key_next = DynamicProjectionKey {
+            layout_key,
+            openai_angle_q: quantize_dynamic_reflow_angle(
+                layout.openai_rect,
+                demo.openai_logo.angle,
+            ),
+            claude_angle_q: quantize_dynamic_reflow_angle(
+                layout.claude_rect,
+                demo.claude_logo.angle,
+            ),
+        };
+        let incremental = compute_dynamic_projection(
+            &engine,
+            demo.body_prepared.as_ref().unwrap(),
+            demo.headline_prepared.as_ref().unwrap(),
+            demo.credit_prepared.as_ref().unwrap(),
+            credit_width,
+            layout,
+            openai_geometry_next.scanlines.as_ref(),
+            claude_geometry_next.scanlines.as_ref(),
+            key_next,
+            Some(baseline),
+        )
+        .0;
+        let fresh = compute_dynamic_projection(
+            &engine,
+            demo.body_prepared.as_ref().unwrap(),
+            demo.headline_prepared.as_ref().unwrap(),
+            demo.credit_prepared.as_ref().unwrap(),
+            credit_width,
+            layout,
+            openai_geometry_next.scanlines.as_ref(),
+            claude_geometry_next.scanlines.as_ref(),
+            key_next,
+            None,
+        )
+        .0;
+
+        assert!(
+            incremental.projection.headline_lines == fresh.projection.headline_lines,
+            "headline diff: {:?}",
+            first_line_diff(
+                &incremental.projection.headline_lines,
+                &fresh.projection.headline_lines,
+            )
+        );
+        assert!(
+            incremental.projection.credit_line == fresh.projection.credit_line,
+            "credit diff: incremental={:?} fresh={:?}",
+            incremental
+                .projection
+                .credit_line
+                .as_ref()
+                .map(line_signature),
+            fresh.projection.credit_line.as_ref().map(line_signature),
+        );
+        assert!(
+            incremental.projection.left_lines == fresh.projection.left_lines,
+            "left diff: {:?}",
+            first_line_diff(
+                &incremental.projection.left_lines,
+                &fresh.projection.left_lines
+            )
+        );
+        assert!(
+            incremental.projection.right_lines == fresh.projection.right_lines,
+            "right diff: {:?}",
+            first_line_diff(
+                &incremental.projection.right_lines,
+                &fresh.projection.right_lines
+            )
+        );
     }
 }

@@ -2872,6 +2872,7 @@ dependencies = [
  "resvg",
  "tiny-skia 0.12.0",
  "ttf-parser",
+ "unicode-segmentation",
 ]
 
 [[package]]

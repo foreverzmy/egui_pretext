@@ -5,15 +5,11 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Label, Layout, Rect, RichText, Sense,
     Shape, Stroke, TextWrapMode, UiBuilder,
 };
-use pretext::{
-    LayoutLine, LayoutLineGlyphRun, LayoutLineVisualRun, LayoutWithLinesResult, PrepareOptions,
-    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
-};
+use pretext::{PrepareOptions, PreparedTextWithSegments, PretextEngine, WhiteSpaceMode};
 use pretext_egui::{
-    shaped_text_baseline_metrics, AssetRegistry, BaselineMetrics, BaselineMode, EmojiAssetId,
-    ShapedTextRasterRequest,
+    paint_pretext_paragraph, AssetRegistry, BaselineMode, EmojiOverlayOptions,
+    PretextParagraphLayout, PretextParagraphPaintOptions, ShapedTextRasterRequest,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::demos::DemoWindow;
 
@@ -52,9 +48,7 @@ struct AccordionSection {
 }
 
 struct SectionMetrics {
-    layout: LayoutWithLinesResult,
-    visual_runs: Vec<Vec<LayoutLineVisualRun>>,
-    glyph_runs: Vec<Vec<LayoutLineGlyphRun>>,
+    paragraph: PretextParagraphLayout,
     meta: String,
     body_height: f32,
 }
@@ -262,9 +256,7 @@ impl AccordionDemo {
                         paint_section_body(
                             &painter.with_clip_rect(body_rect),
                             body_rect,
-                            &metrics.layout.lines,
-                            &metrics.visual_runs,
-                            &metrics.glyph_runs,
+                            &metrics.paragraph,
                             BODY_LINE_HEIGHT,
                             ctx,
                             engine,
@@ -324,7 +316,7 @@ impl AccordionDemo {
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
-            .default_size(egui::vec2(860.0, 640.0))
+            .default_size(egui::vec2(1720.0, 1280.0))
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
@@ -396,37 +388,37 @@ fn measure_section(
     prepared: &PreparedTextWithSegments,
     text_width: f32,
 ) -> SectionMetrics {
-    let layout = engine.layout_with_lines(prepared, text_width, BODY_LINE_HEIGHT);
-    let visual_runs = layout
-        .lines
-        .iter()
-        .map(|line| engine.line_visual_runs(prepared, line))
-        .collect::<Vec<_>>();
-    let glyph_runs = layout
-        .lines
-        .iter()
-        .zip(visual_runs.iter())
-        .map(|(line, visual_runs)| {
-            let glyph_runs = engine.line_glyph_runs(prepared, line);
-            strip_supported_emoji_glyphs(visual_runs, &glyph_runs, engine)
-        })
-        .collect();
-    let meta = section_meta(&layout);
-    let body_height = expanded_body_height(layout.height);
+    let style = accordion_body_style();
+    let overlay_options = EmojiOverlayOptions {
+        style: &style,
+        slot_height: BODY_LINE_HEIGHT,
+        padding_x: BODY_SHAPED_TEXT_PAD_X,
+        padding_y: BODY_SHAPED_TEXT_PAD_Y,
+        slack_x: 2.0,
+        slack_y: 2.0,
+        baseline_mode: BaselineMode::AutoFontMetrics,
+    };
+    let paragraph = PretextParagraphLayout::from_prepared(
+        engine,
+        prepared,
+        text_width,
+        BODY_LINE_HEIGHT,
+        Some(overlay_options),
+    );
+    let meta = section_meta(paragraph.line_count, paragraph.height);
+    let body_height = expanded_body_height(paragraph.height);
     SectionMetrics {
-        layout,
-        visual_runs,
-        glyph_runs,
+        paragraph,
         meta,
         body_height,
     }
 }
 
-fn section_meta(layout: &LayoutWithLinesResult) -> String {
+fn section_meta(line_count: usize, height: f32) -> String {
     format!(
         "Measurement: {} lines · {}px",
-        layout.line_count,
-        layout.height.round() as i32
+        line_count,
+        height.round() as i32
     )
 }
 
@@ -564,137 +556,31 @@ fn paint_glyph(painter: &egui::Painter, center: egui::Pos2, open_t: f32) {
 fn paint_section_body(
     painter: &egui::Painter,
     body_rect: Rect,
-    lines: &[LayoutLine],
-    visual_runs: &[Vec<LayoutLineVisualRun>],
-    glyph_runs: &[Vec<LayoutLineGlyphRun>],
+    paragraph: &PretextParagraphLayout,
     line_height: f32,
     ctx: &egui::Context,
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
-    let mut y = body_rect.top();
-    for (index, line) in lines.iter().enumerate() {
-        let runs = visual_runs.get(index).map(Vec::as_slice).unwrap_or(&[]);
-        let glyphs = glyph_runs.get(index).map(Vec::as_slice).unwrap_or(&[]);
-        if !assets.paint_line_glyph_runs(
-            painter,
-            body_rect.left() + BODY_PADDING_X,
-            y,
-            glyphs,
-            &accordion_body_style(),
-            line_height,
-            INK,
-            ctx,
-            engine,
-        ) {
-            painter.text(
-                egui::pos2(body_rect.left() + BODY_PADDING_X, y),
-                Align2::LEFT_TOP,
-                &line.text,
-                FontId::new(BODY_TEXT_SIZE, FontFamily::Proportional),
-                INK,
-            );
-        }
-
-        if !runs.is_empty() {
-            let mut offset = 0.0f32;
-            for run in runs {
-                paint_supported_emoji_overlays(
-                    painter,
-                    body_rect.left() + BODY_PADDING_X + offset,
-                    y,
-                    run,
-                    ctx,
-                    engine,
-                    assets,
-                    line_height,
-                );
-                offset += run.width;
-            }
-        }
-        y += line_height;
-    }
+    let style = accordion_body_style();
+    let options = PretextParagraphPaintOptions::new(&style, line_height)
+        .color(INK)
+        .fallback_font(FontId::new(BODY_TEXT_SIZE, FontFamily::Proportional))
+        .fallback_align(Align2::LEFT_TOP)
+        .emoji_size(BODY_EMOJI_SIZE)
+        .emoji_slot_height(line_height - 2.0);
+    paint_pretext_paragraph(
+        painter,
+        egui::pos2(body_rect.left() + BODY_PADDING_X, body_rect.top()),
+        paragraph,
+        &options,
+        ctx,
+        engine,
+        assets,
+    );
 }
 
-fn strip_supported_emoji_glyphs(
-    visual_runs: &[LayoutLineVisualRun],
-    glyph_runs: &[LayoutLineGlyphRun],
-    engine: &PretextEngine,
-) -> Vec<LayoutLineGlyphRun> {
-    let mut run_left = 0.0f32;
-    let mut output = Vec::with_capacity(glyph_runs.len());
-
-    for (visual_run, glyph_run) in visual_runs.iter().zip(glyph_runs.iter()) {
-        if !contains_supported_emoji(&visual_run.text) {
-            output.push(glyph_run.clone());
-            run_left += visual_run.width;
-            continue;
-        }
-
-        let prefix_widths = engine.prefix_widths(&visual_run.text, &accordion_body_style());
-        let emoji_ranges = visual_run
-            .text
-            .grapheme_indices(true)
-            .enumerate()
-            .filter_map(|(index, (_, grapheme))| {
-                AssetRegistry::builtin_emoji_for_grapheme(grapheme).map(|_| {
-                    (
-                        run_left + prefix_widths[index],
-                        run_left + prefix_widths[index + 1],
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut filtered = glyph_run.clone();
-        filtered.glyphs.retain(|glyph| {
-            let center_x = glyph.x + glyph.x_offset + glyph.advance * 0.5;
-            !emoji_ranges
-                .iter()
-                .any(|(start, end)| center_x >= *start && center_x <= *end)
-        });
-        output.push(filtered);
-        run_left += visual_run.width;
-    }
-
-    output
-}
-
-fn paint_supported_emoji_overlays(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-    line_height: f32,
-) {
-    if !contains_supported_emoji(&run.text) {
-        return;
-    }
-
-    let baseline_metrics = accordion_run_baseline_metrics(run, INK, engine);
-    let prefix_widths = engine.prefix_widths(&run.text, &accordion_body_style());
-    for (index, (_, grapheme)) in run.text.grapheme_indices(true).enumerate() {
-        let Some(emoji_id) = AssetRegistry::builtin_emoji_for_grapheme(grapheme) else {
-            continue;
-        };
-        paint_emoji_fragment(
-            painter,
-            run_left,
-            y,
-            run,
-            prefix_widths[index],
-            prefix_widths[index + 1],
-            emoji_id,
-            ctx,
-            assets,
-            line_height,
-            baseline_metrics,
-        );
-    }
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 fn accordion_shaped_text_request<'a>(
     text: &'a str,
     style: &'a pretext::TextStyleSpec,
@@ -717,82 +603,6 @@ fn accordion_shaped_text_request<'a>(
         baseline_mode,
         texture_options: egui::TextureOptions::NEAREST,
     }
-}
-
-fn fragment_slot_left(
-    run_left: f32,
-    run: &LayoutLineVisualRun,
-    fragment_offset: f32,
-    fragment_width: f32,
-) -> f32 {
-    match run.direction {
-        pretext::BidiDirection::Ltr => run_left + fragment_offset,
-        pretext::BidiDirection::Rtl => run_left + run.width - fragment_offset - fragment_width,
-    }
-}
-
-fn paint_emoji_fragment(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    fragment_start: f32,
-    fragment_end: f32,
-    emoji_id: EmojiAssetId,
-    ctx: &egui::Context,
-    assets: &mut AssetRegistry,
-    line_height: f32,
-    baseline_metrics: BaselineMetrics,
-) {
-    let slot_left = fragment_slot_left(
-        run_left,
-        run,
-        fragment_start,
-        (fragment_end - fragment_start).max(1.0),
-    );
-    let slot_width = (fragment_end - fragment_start).max(1.0);
-    let size = BODY_EMOJI_SIZE
-        .min(line_height - 2.0)
-        .min(slot_width)
-        .max(1.0);
-    let rect = Rect::from_min_size(
-        egui::pos2(
-            slot_left + (slot_width - size).max(0.0) * 0.5,
-            y + baseline_metrics.square_top(size),
-        ),
-        egui::vec2(size, size),
-    );
-    let texture = assets.emoji_texture(emoji_id, [96, 96], ctx);
-    painter.image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-fn accordion_run_baseline_metrics(
-    run: &LayoutLineVisualRun,
-    color: Color32,
-    engine: &PretextEngine,
-) -> BaselineMetrics {
-    let style = accordion_body_style();
-    shaped_text_baseline_metrics(
-        engine,
-        accordion_shaped_text_request(
-            &run.text,
-            &style,
-            run.direction,
-            color,
-            run.width,
-            BaselineMode::AutoFontMetrics,
-        ),
-    )
-}
-
-fn contains_supported_emoji(text: &str) -> bool {
-    text.graphemes(true)
-        .any(|grapheme| AssetRegistry::builtin_emoji_for_grapheme(grapheme).is_some())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -883,7 +693,7 @@ mod tests {
         );
 
         assert_eq!(
-            section_meta(&layout),
+            section_meta(layout.line_count, layout.height),
             format!(
                 "Measurement: {} lines · {}px",
                 layout.line_count,
@@ -991,16 +801,12 @@ mod tests {
             &accordion_body_style(),
             &normal_options(),
         );
-        let layout = engine.layout_with_lines(&prepared, body_text_width(360.0), BODY_LINE_HEIGHT);
-        let visual_runs = layout
+        let layout = engine.layout_with_runs(&prepared, body_text_width(360.0), BODY_LINE_HEIGHT);
+
+        let run = layout
             .lines
             .iter()
-            .map(|line| engine.line_visual_runs(&prepared, line))
-            .collect::<Vec<_>>();
-
-        let run = visual_runs
-            .iter()
-            .flatten()
+            .flat_map(|line| line.runs.visual_runs.iter())
             .find(|run| contains_arabic_shaping(&run.text))
             .cloned()
             .expect("expected arabic visual run");

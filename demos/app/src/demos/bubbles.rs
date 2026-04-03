@@ -3,15 +3,15 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense,
     Stroke, UiBuilder,
 };
+#[cfg(test)]
+use pretext::BidiDirection;
 use pretext::{
-    BidiDirection, LayoutLine, LayoutLineVisualRun, ParagraphDirection, PrepareOptions,
-    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
+    ParagraphDirection, PrepareOptions, PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
 };
 use pretext_egui::{
-    shaped_text_baseline_metrics, AssetRegistry, BaselineMetrics, BaselineMode, EmojiAssetId,
-    ShapedTextRasterRequest,
+    paint_pretext_paragraph, AssetRegistry, BaselineMode, EmojiOverlayOptions,
+    PretextParagraphLayout, PretextParagraphPaintOptions,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::demos::DemoWindow;
 
@@ -94,8 +94,7 @@ struct BubbleVisual {
     side: BubbleSide,
     bubble_width: f32,
     bubble_height: f32,
-    lines: Vec<LayoutLine>,
-    visual_runs: Vec<Vec<LayoutLineVisualRun>>,
+    paragraph: PretextParagraphLayout,
 }
 
 struct BubbleRenderState {
@@ -186,7 +185,7 @@ impl BubblesDemo {
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
-            .default_size(egui::vec2(1600.0, 900.0))
+            .default_size(egui::vec2(3200.0, 1800.0))
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
@@ -435,24 +434,29 @@ fn build_bubble_visual(
     bubble: &PreparedBubble,
     wrap_width: f32,
 ) -> BubbleVisual {
-    let layout = engine.layout_with_lines(&bubble.prepared, wrap_width.max(1.0), LINE_HEIGHT);
-    let visual_runs = layout
-        .lines
-        .iter()
-        .map(|line| engine.line_visual_runs(&bubble.prepared, line))
-        .collect::<Vec<_>>();
-    let max_line_width = layout
-        .lines
-        .iter()
-        .fold(0.0f32, |acc, line| acc.max(line.width));
-    let height = layout.line_count as f32 * LINE_HEIGHT;
+    let style = bubble_text_style();
+    let overlay_options = EmojiOverlayOptions {
+        style: &style,
+        slot_height: LINE_HEIGHT,
+        padding_x: SHAPED_TEXT_PAD_X,
+        padding_y: SHAPED_TEXT_PAD_Y,
+        slack_x: 2.0,
+        slack_y: 2.0,
+        baseline_mode: BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
+    };
+    let paragraph = PretextParagraphLayout::from_prepared(
+        engine,
+        &bubble.prepared,
+        wrap_width.max(1.0),
+        LINE_HEIGHT,
+        Some(overlay_options),
+    );
 
     BubbleVisual {
         side: bubble.side,
-        bubble_width: max_line_width.ceil() + BUBBLE_PADDING_H * 2.0,
-        bubble_height: height + BUBBLE_PADDING_V * 2.0,
-        lines: layout.lines,
-        visual_runs,
+        bubble_width: paragraph.width.ceil() + BUBBLE_PADDING_H * 2.0,
+        bubble_height: paragraph.height + BUBBLE_PADDING_V * 2.0,
+        paragraph,
     }
 }
 
@@ -762,347 +766,25 @@ fn paint_message_text(
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
-    let mut y = bubble_rect.top() + BUBBLE_PADDING_V;
-    for (index, line) in bubble.lines.iter().enumerate() {
-        let runs = bubble
-            .visual_runs
-            .get(index)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if runs.is_empty() {
-            painter.text(
-                egui::pos2(bubble_rect.left() + BUBBLE_PADDING_H, y),
-                Align2::LEFT_TOP,
-                &line.text,
-                FontId::new(TEXT_SIZE, FontFamily::Proportional),
-                CHAT_TEXT,
-            );
-            y += LINE_HEIGHT;
-            continue;
-        }
-
-        let mut offset = 0.0f32;
-        for run in runs {
-            if contains_arabic_shaping(&run.text) {
-                paint_shaped_text_run(
-                    painter,
-                    bubble_rect.left() + BUBBLE_PADDING_H + offset,
-                    y,
-                    run,
-                    ctx,
-                    engine,
-                    assets,
-                );
-            } else {
-                paint_run_with_svg_emoji_fallback(
-                    painter,
-                    bubble_rect.left() + BUBBLE_PADDING_H + offset,
-                    y,
-                    run,
-                    &FontId::new(TEXT_SIZE, FontFamily::Proportional),
-                    CHAT_TEXT,
-                    ctx,
-                    engine,
-                    assets,
-                    LINE_HEIGHT,
-                );
-            }
-            offset += run.width;
-        }
-
-        y += LINE_HEIGHT;
-    }
-}
-
-fn paint_shaped_text_run(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-) {
-    paint_shaped_text_fragment(
+    let style = bubble_text_style();
+    let options = PretextParagraphPaintOptions::new(&style, LINE_HEIGHT)
+        .color(CHAT_TEXT)
+        .fallback_font(FontId::new(TEXT_SIZE, FontFamily::Proportional))
+        .fallback_align(Align2::LEFT_TOP)
+        .emoji_size(EMOJI_SIZE)
+        .emoji_slot_height(LINE_HEIGHT);
+    paint_pretext_paragraph(
         painter,
-        run_left,
-        y,
-        run,
-        0.0,
-        run.width,
-        &run.text,
-        CHAT_TEXT,
+        egui::pos2(
+            bubble_rect.left() + BUBBLE_PADDING_H,
+            bubble_rect.top() + BUBBLE_PADDING_V,
+        ),
+        &bubble.paragraph,
+        &options,
         ctx,
         engine,
         assets,
-        BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
     );
-}
-
-fn bubble_shaped_text_request<'a>(
-    text: &'a str,
-    style: &'a pretext::TextStyleSpec,
-    direction: BidiDirection,
-    color: Color32,
-    fragment_width: f32,
-    baseline_mode: BaselineMode,
-) -> ShapedTextRasterRequest<'a> {
-    ShapedTextRasterRequest {
-        text,
-        style,
-        direction,
-        color,
-        fragment_width,
-        slot_height: LINE_HEIGHT,
-        padding_x: SHAPED_TEXT_PAD_X,
-        padding_y: SHAPED_TEXT_PAD_Y,
-        slack_x: 2.0,
-        slack_y: 2.0,
-        baseline_mode,
-        texture_options: egui::TextureOptions::NEAREST,
-    }
-}
-
-fn paint_run_with_svg_emoji_fallback(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    font: &FontId,
-    color: Color32,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-    line_height: f32,
-) {
-    if !contains_supported_emoji(&run.text) {
-        paint_text_fragment(painter, run_left, y, run, 0.0, &run.text, font, color);
-        return;
-    }
-
-    let baseline_metrics = bubble_run_baseline_metrics(run, color, engine);
-    let baseline_mode = BaselineMode::FixedBaselinePx(baseline_metrics.baseline_px);
-    let graphemes = run.text.grapheme_indices(true).collect::<Vec<_>>();
-    let prefix_widths = engine.prefix_widths(&run.text, &bubble_text_style());
-    let mut fragment_start = 0usize;
-
-    for (index, (byte_start, grapheme)) in graphemes.iter().enumerate() {
-        let Some(emoji_id) = AssetRegistry::builtin_emoji_for_grapheme(grapheme) else {
-            continue;
-        };
-
-        if fragment_start < index {
-            let text_start = graphemes[fragment_start].0;
-            let text = &run.text[text_start..*byte_start];
-            let fragment_offset = prefix_widths[fragment_start];
-            let fragment_width = prefix_widths[index] - fragment_offset;
-            paint_shaped_text_fragment(
-                painter,
-                run_left,
-                y,
-                run,
-                fragment_offset,
-                fragment_width,
-                text,
-                color,
-                ctx,
-                engine,
-                assets,
-                baseline_mode,
-            );
-        }
-
-        let emoji_start = prefix_widths[index];
-        let emoji_end = prefix_widths[index + 1];
-        paint_emoji_fragment(
-            painter,
-            run_left,
-            y,
-            run,
-            emoji_start,
-            emoji_end,
-            emoji_id,
-            ctx,
-            assets,
-            line_height,
-            baseline_metrics,
-        );
-
-        fragment_start = index + 1;
-    }
-
-    if fragment_start < graphemes.len() {
-        let text_start = graphemes[fragment_start].0;
-        let text = &run.text[text_start..];
-        let fragment_offset = prefix_widths[fragment_start];
-        let fragment_width = prefix_widths.last().copied().unwrap_or(run.width) - fragment_offset;
-        paint_shaped_text_fragment(
-            painter,
-            run_left,
-            y,
-            run,
-            fragment_offset,
-            fragment_width,
-            text,
-            color,
-            ctx,
-            engine,
-            assets,
-            baseline_mode,
-        );
-    }
-}
-
-fn paint_shaped_text_fragment(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    fragment_offset: f32,
-    fragment_width: f32,
-    text: &str,
-    color: Color32,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-    baseline_mode: BaselineMode,
-) {
-    if text.is_empty() {
-        return;
-    }
-
-    let style = bubble_text_style();
-    let request = bubble_shaped_text_request(
-        text,
-        &style,
-        run.direction,
-        color,
-        fragment_width,
-        baseline_mode,
-    );
-    let Some(texture) = assets.shaped_text_texture(engine, request, ctx) else {
-        return;
-    };
-    let slot_left = fragment_slot_left(run_left, run, fragment_offset, fragment_width);
-    let pixels_per_point = ctx.pixels_per_point().max(1.0);
-    let rect_min = egui::pos2(
-        ((slot_left - SHAPED_TEXT_PAD_X) * pixels_per_point).round() / pixels_per_point,
-        ((y - SHAPED_TEXT_PAD_Y) * pixels_per_point).round() / pixels_per_point,
-    );
-    let rect = Rect::from_min_size(rect_min, texture.logical_size);
-    painter.image(
-        texture.handle.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        color,
-    );
-}
-
-fn paint_text_fragment(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    fragment_offset: f32,
-    text: &str,
-    font: &FontId,
-    color: Color32,
-) {
-    if text.is_empty() {
-        return;
-    }
-
-    let (anchor, pos_x) = match run.direction {
-        BidiDirection::Ltr => (Align2::LEFT_TOP, run_left + fragment_offset),
-        BidiDirection::Rtl => (Align2::RIGHT_TOP, run_left + run.width - fragment_offset),
-    };
-    painter.text(egui::pos2(pos_x, y), anchor, text, font.clone(), color);
-}
-
-fn paint_emoji_fragment(
-    painter: &egui::Painter,
-    run_left: f32,
-    y: f32,
-    run: &LayoutLineVisualRun,
-    fragment_start: f32,
-    fragment_end: f32,
-    emoji_id: EmojiAssetId,
-    ctx: &egui::Context,
-    assets: &mut AssetRegistry,
-    line_height: f32,
-    baseline_metrics: BaselineMetrics,
-) {
-    let slot_left = fragment_slot_left(
-        run_left,
-        run,
-        fragment_start,
-        (fragment_end - fragment_start).max(1.0),
-    );
-    let slot_width = (fragment_end - fragment_start).max(1.0);
-    let size = EMOJI_SIZE.min(line_height - 2.0).min(slot_width).max(1.0);
-    let rect = Rect::from_min_size(
-        egui::pos2(
-            slot_left + (slot_width - size).max(0.0) * 0.5,
-            y + baseline_metrics.square_top(size),
-        ),
-        egui::vec2(size, size),
-    );
-    let texture = assets.emoji_texture(emoji_id, [96, 96], ctx);
-    painter.image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-fn fragment_slot_left(
-    run_left: f32,
-    run: &LayoutLineVisualRun,
-    fragment_offset: f32,
-    fragment_width: f32,
-) -> f32 {
-    match run.direction {
-        BidiDirection::Ltr => run_left + fragment_offset,
-        BidiDirection::Rtl => run_left + run.width - fragment_offset - fragment_width,
-    }
-}
-
-fn bubble_run_baseline_metrics(
-    run: &LayoutLineVisualRun,
-    color: Color32,
-    engine: &PretextEngine,
-) -> BaselineMetrics {
-    let style = bubble_text_style();
-    shaped_text_baseline_metrics(
-        engine,
-        bubble_shaped_text_request(
-            &run.text,
-            &style,
-            run.direction,
-            color,
-            run.width,
-            BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
-        ),
-    )
-}
-
-fn contains_supported_emoji(text: &str) -> bool {
-    text.graphemes(true)
-        .any(|grapheme| AssetRegistry::builtin_emoji_for_grapheme(grapheme).is_some())
-}
-
-fn contains_arabic_shaping(text: &str) -> bool {
-    text.chars().any(|ch| {
-        matches!(
-            ch as u32,
-            0x0600..=0x06FF
-                | 0x0750..=0x077F
-                | 0x08A0..=0x08FF
-                | 0xFB50..=0xFDFF
-                | 0xFE70..=0xFEFF
-        )
-    })
 }
 
 fn paint_why_section(ui: &mut egui::Ui) {
@@ -1236,11 +918,14 @@ mod tests {
         let output = ctx.run(raw_input(), |ctx| {
             demo.show_window(ctx, &engine, &mut assets);
         });
+        let stats = assets.stats_snapshot();
 
         assert!(output
             .shapes
             .iter()
             .any(|clipped| shape_uses_user_texture(&clipped.shape)));
+        assert!(stats.atlas_entries > 0);
+        assert_eq!(stats.shaped_text_textures, 0);
     }
 
     #[test]
@@ -1259,9 +944,9 @@ mod tests {
             .collect::<Vec<_>>();
         let render = compute_bubble_render(&prepared, &engine, DEFAULT_CHAT_WIDTH);
         let bubble = &render.tight_bubbles[5];
-        let first_line_runs = &bubble.visual_runs[0];
+        let first_line_runs = &bubble.paragraph.lines[0].visual_runs;
 
-        assert_eq!(bubble.lines[0].text, "كل شيء! Mixed bidi,");
+        assert_eq!(bubble.paragraph.lines[0].line.text, "كل شيء! Mixed bidi,");
         assert_eq!(first_line_runs.len(), 2);
         assert_eq!(first_line_runs[0].direction, BidiDirection::Rtl);
         assert!(first_line_runs[0].text.contains("كل شيء"));
@@ -1270,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_bidi_shaped_text_texture_reuses_cached_handle() {
+    fn mixed_bidi_glyph_atlas_reuses_cached_entries() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
         let mut assets = AssetRegistry::default();
@@ -1286,30 +971,51 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let render = compute_bubble_render(&prepared, &engine, DEFAULT_CHAT_WIDTH);
-        let run = render.tight_bubbles[5].visual_runs[0][0].clone();
-        let style = bubble_text_style();
-        let request = bubble_shaped_text_request(
-            &run.text,
-            &style,
-            run.direction,
-            CHAT_TEXT,
-            run.width,
-            BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
-        );
-        let first = assets
-            .shaped_text_texture(&engine, request, &ctx)
-            .expect("texture exists");
-        let second = assets
-            .shaped_text_texture(&engine, request, &ctx)
-            .expect("cached texture exists");
-        let stats = assets.stats_snapshot();
+        let glyph_runs = render.tight_bubbles[5].paragraph.lines[0]
+            .glyph_runs
+            .clone();
 
-        assert_eq!(first.handle.id(), second.handle.id());
-        assert_eq!(first.logical_size, second.logical_size);
-        assert!(first.logical_size.x >= run.width + SHAPED_TEXT_PAD_X * 2.0);
-        assert_eq!(stats.texture_uploads, 1);
-        assert_eq!(stats.texture_cache_hits, 1);
-        assert_eq!(stats.texture_cache_misses, 1);
-        assert_eq!(stats.render.rasterizations, 1);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("bubbles-glyph-atlas-first"),
+            ));
+            assert!(assets.paint_line_glyph_runs(
+                &painter,
+                12.0,
+                12.0,
+                &glyph_runs,
+                &bubble_text_style(),
+                LINE_HEIGHT,
+                CHAT_TEXT,
+                ctx,
+                &engine,
+            ));
+        });
+        let after_first = assets.stats_snapshot();
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("bubbles-glyph-atlas-second"),
+            ));
+            assert!(assets.paint_line_glyph_runs(
+                &painter,
+                12.0,
+                12.0,
+                &glyph_runs,
+                &bubble_text_style(),
+                LINE_HEIGHT,
+                CHAT_TEXT,
+                ctx,
+                &engine,
+            ));
+        });
+        let after_second = assets.stats_snapshot();
+
+        assert!(after_first.atlas_entries > 0);
+        assert_eq!(after_first.atlas_entries, after_second.atlas_entries);
+        assert_eq!(after_first.texture_uploads, after_second.texture_uploads);
+        assert!(after_second.atlas_hits > after_first.atlas_hits);
     }
 }

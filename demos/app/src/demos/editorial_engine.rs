@@ -12,10 +12,9 @@ use pretext::{
     LayoutCursor, LayoutLineGlyphRun, LayoutLineVisualRun, PrepareOptions,
     PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
 };
-use pretext_egui::AssetRegistry;
+use pretext_egui::{AssetRegistry, PretextFragmentPaintOptions, PretextFragmentPainter};
 
-use crate::demos::text_runs::paint_glyph_runs;
-use crate::demos::DemoWindow;
+use crate::demos::{DemoPerfStats, DemoWindow};
 use crate::geometry::{Interval, Point, Rect as GeoRect};
 
 const HEADLINE: &str = "THE FUTURE OF TEXT\u{2002}LAYOUT IS NOT CSS";
@@ -128,7 +127,9 @@ pub struct EditorialEngineDemo {
     drop_cap_prepared: Option<PreparedTextWithSegments>,
     drop_cap_total_width: Option<f32>,
     layout_cache: Option<CachedEditorialLayout>,
-    projection_cache: Option<CachedEditorialProjection>,
+    static_projection_cache: Option<CachedStaticEditorialProjection>,
+    body_projection_cache: Option<CachedEditorialBodyProjection>,
+    body_cache_stats: EditorialBodyCacheStats,
     background_texture: Option<SizedTexture>,
     orb_textures: HashMap<OrbTextureKey, SizedTexture>,
 }
@@ -188,7 +189,7 @@ enum PullQuoteSide {
     Right,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct CircleObstacle {
     center: Point,
     radius: f32,
@@ -215,12 +216,29 @@ struct PullQuoteBox {
     col_idx: usize,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Clone)]
 struct EditorialProjection {
     headline_lines: Vec<PositionedLine>,
     body_lines: Vec<PositionedLine>,
     pull_quotes: Vec<PullQuoteBox>,
     drop_cap_line: PositionedLine,
+}
+
+struct EditorialProjectionRef<'a> {
+    headline_lines: &'a [PositionedLine],
+    body_columns: &'a [CachedEditorialBodyColumn],
+    pull_quotes: &'a [PullQuoteBox],
+    drop_cap_line: &'a PositionedLine,
+}
+
+#[derive(Clone)]
+struct StaticEditorialProjection {
+    headline_lines: Vec<PositionedLine>,
+    pull_quotes: Vec<PullQuoteBox>,
+    drop_cap_line: PositionedLine,
+    body_rect_obstacles: Vec<Box<[RectObstacle]>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,10 +256,80 @@ struct CachedEditorialLayout {
 }
 
 #[derive(Clone)]
-struct CachedEditorialProjection {
+struct CachedStaticEditorialProjection {
     layout_key: EditorialLayoutKey,
-    reflow_signature: u64,
-    projection: EditorialProjection,
+    projection: StaticEditorialProjection,
+}
+
+#[derive(Clone)]
+struct CachedEditorialBodyProjection {
+    layout_key: EditorialLayoutKey,
+    orb_bucket_signature: OrbBucketSignature,
+    plans: Vec<BodyColumnPlan>,
+    circle_obstacles: Vec<CircleObstacle>,
+    columns: Vec<CachedEditorialBodyColumn>,
+}
+
+#[derive(Clone)]
+struct CachedEditorialBodyColumn {
+    bands: Vec<CachedEditorialBodyBand>,
+}
+
+#[derive(Clone)]
+struct CachedEditorialBodyBand {
+    input_cursor: LayoutCursor,
+    signature: BandSlotSignature,
+    lines: Vec<PositionedLine>,
+    output_cursor: LayoutCursor,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EditorialBodyCacheStats {
+    bucket_hits: usize,
+    dirty_bands: usize,
+    full_recomputes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OrbBucketSignature {
+    active_orbs: Vec<QuantizedOrb>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuantizedOrb {
+    x_q: i32,
+    y_q: i32,
+    radius_q: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BandSlotSignature {
+    slots: Vec<QuantizedInterval>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuantizedInterval {
+    left_q: i32,
+    right_q: i32,
+}
+
+#[derive(Clone, Default)]
+struct BodyColumnPlan {
+    bands: Vec<BodyBandPlan>,
+}
+
+#[derive(Clone)]
+struct BodyBandPlan {
+    line_top: f32,
+    slots: Vec<Interval>,
+    signature: BandSlotSignature,
+}
+
+#[derive(Default)]
+struct EditorialBandScratch {
+    blocked: Vec<Interval>,
+    slots: Vec<Interval>,
+    scratch_slots: Vec<Interval>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -286,7 +374,9 @@ impl Default for EditorialEngineDemo {
             drop_cap_prepared: None,
             drop_cap_total_width: None,
             layout_cache: None,
-            projection_cache: None,
+            static_projection_cache: None,
+            body_projection_cache: None,
+            body_cache_stats: EditorialBodyCacheStats::default(),
             background_texture: None,
             orb_textures: HashMap::new(),
         }
@@ -315,7 +405,7 @@ impl DemoWindow for EditorialEngineDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1220.0, 820.0))
+            .default_size(egui::vec2(2440.0, 1640.0))
             .show(ctx, |ui| {
                 let now = ctx.input(|input| input.time);
                 let available = ui.available_size();
@@ -334,10 +424,6 @@ impl DemoWindow for EditorialEngineDemo {
 
                 self.ensure_orbs(page);
                 let drop_cap_total_width = self.ensure_drop_cap_total_width(engine);
-                let body_prepared = self.ensure_body_prepared(engine).clone();
-                let pull_quote_prepared = self.ensure_pull_quote_prepared(engine).clone();
-                let drop_cap_prepared = self.ensure_drop_cap_prepared(engine).clone();
-
                 let layout = self.ensure_layout(engine, page, drop_cap_total_width);
                 let dragged_orb_index =
                     handle_orb_interaction(ui, page_rect, &layout, &mut self.orbs, &mut self.drag);
@@ -347,15 +433,6 @@ impl DemoWindow for EditorialEngineDemo {
                     &mut self.orbs,
                     &mut self.last_time,
                     dragged_orb_index,
-                );
-                let current_orbs = self.orbs.clone();
-                let projection = self.ensure_projection(
-                    engine,
-                    &body_prepared,
-                    &pull_quote_prepared,
-                    &drop_cap_prepared,
-                    &layout,
-                    &current_orbs,
                 );
 
                 let painter = ui.painter().clone();
@@ -376,9 +453,10 @@ impl DemoWindow for EditorialEngineDemo {
                     .into_iter()
                     .map(|(radius, rgb)| self.ensure_orb_texture(ctx, radius, rgb))
                     .collect::<Vec<_>>();
+                let projection = self.ensure_projection(engine, &layout);
 
                 paint_editorial_background(&painter, page_rect, &background_texture);
-                paint_projection(&painter, &projection, &layout, ctx, engine, assets);
+                paint_projection(&painter, projection, &layout, ctx, engine, assets);
                 paint_orbs(&painter, &layout, &self.orbs, &orb_textures);
                 paint_editorial_chrome(&painter, page_rect, layout.is_narrow, ctx, engine, assets);
 
@@ -387,6 +465,15 @@ impl DemoWindow for EditorialEngineDemo {
                 }
             });
         self.open = open;
+    }
+
+    fn perf_stats(&self) -> DemoPerfStats {
+        DemoPerfStats {
+            editorial_bucket_hits: self.body_cache_stats.bucket_hits,
+            editorial_dirty_bands: self.body_cache_stats.dirty_bands,
+            editorial_full_recomputes: self.body_cache_stats.full_recomputes,
+            ..DemoPerfStats::default()
+        }
     }
 }
 
@@ -466,7 +553,8 @@ impl EditorialEngineDemo {
         ctx: &egui::Context,
         logical_size: [usize; 2],
     ) -> TextureHandle {
-        let clamped_size = [logical_size[0].max(1), logical_size[1].max(1)];
+        let max_texture_side = ctx.input(|input| input.max_texture_side).max(1);
+        let clamped_size = clamp_texture_size_to_limit(logical_size, max_texture_side);
         if let Some(cached) = &self.background_texture {
             if cached.size == clamped_size {
                 return cached.texture.clone();
@@ -539,7 +627,9 @@ impl EditorialEngineDemo {
                 key,
                 layout: build_editorial_layout(page, engine, drop_cap_total_width),
             });
-            self.projection_cache = None;
+            self.static_projection_cache = None;
+            self.body_projection_cache = None;
+            self.body_cache_stats = EditorialBodyCacheStats::default();
         }
 
         self.layout_cache
@@ -549,15 +639,11 @@ impl EditorialEngineDemo {
             .clone()
     }
 
-    fn ensure_projection(
-        &mut self,
+    fn ensure_projection<'a>(
+        &'a mut self,
         engine: &PretextEngine,
-        body_prepared: &PreparedTextWithSegments,
-        pull_quote_prepared: &[PreparedTextWithSegments],
-        drop_cap_prepared: &PreparedTextWithSegments,
         layout: &EditorialLayout,
-        orbs: &[Orb],
-    ) -> EditorialProjection {
+    ) -> EditorialProjectionRef<'a> {
         let layout_key = self
             .layout_cache
             .as_ref()
@@ -568,28 +654,128 @@ impl EditorialEngineDemo {
                 page_height_q: quantize_editorial_value(layout.page.height),
                 drop_cap_width_q: quantize_editorial_value(layout.drop_cap_rect.width),
             });
-        let reflow_signature = editorial_reflow_signature(layout, orbs);
-        if let Some(cached) = &self.projection_cache {
-            if cached.layout_key == layout_key && cached.reflow_signature == reflow_signature {
-                return cached.projection.clone();
+        self.ensure_body_prepared(engine);
+        self.ensure_static_projection(engine, layout);
+
+        let static_projection = &self
+            .static_projection_cache
+            .as_ref()
+            .expect("editorial static projection cache should exist")
+            .projection;
+        let orb_bucket_signature = orb_bucket_signature_for_layout(layout, &self.orbs);
+        let bucket_hit = self.body_projection_cache.as_ref().is_some_and(|cached| {
+            cached.layout_key == layout_key && cached.orb_bucket_signature == orb_bucket_signature
+        });
+        if bucket_hit {
+            self.body_cache_stats = EditorialBodyCacheStats {
+                bucket_hits: 1,
+                ..EditorialBodyCacheStats::default()
+            };
+            let body_columns = &self
+                .body_projection_cache
+                .as_ref()
+                .expect("editorial body projection cache should exist")
+                .columns;
+            return EditorialProjectionRef {
+                headline_lines: &static_projection.headline_lines,
+                body_columns,
+                pull_quotes: &static_projection.pull_quotes,
+                drop_cap_line: &static_projection.drop_cap_line,
+            };
+        }
+        let body_prepared = self
+            .body_prepared
+            .as_ref()
+            .expect("editorial body should exist");
+        let cached_body_projection = self
+            .body_projection_cache
+            .take()
+            .filter(|cached| cached.layout_key == layout_key);
+        let (body_projection_cache, stats) = compute_incremental_body_projection_cache(
+            engine,
+            body_prepared,
+            layout,
+            &self.orbs,
+            static_projection,
+            layout_key,
+            orb_bucket_signature,
+            cached_body_projection,
+        );
+        self.body_projection_cache = Some(body_projection_cache);
+        self.body_cache_stats = stats;
+
+        let static_projection = &self
+            .static_projection_cache
+            .as_ref()
+            .expect("editorial static projection cache should exist")
+            .projection;
+        let body_columns = &self
+            .body_projection_cache
+            .as_ref()
+            .expect("editorial body projection cache should exist")
+            .columns;
+
+        EditorialProjectionRef {
+            headline_lines: &static_projection.headline_lines,
+            body_columns,
+            pull_quotes: &static_projection.pull_quotes,
+            drop_cap_line: &static_projection.drop_cap_line,
+        }
+    }
+
+    fn ensure_static_projection(&mut self, engine: &PretextEngine, layout: &EditorialLayout) {
+        let layout_key = self
+            .layout_cache
+            .as_ref()
+            .map(|cached| cached.key)
+            .unwrap_or(EditorialLayoutKey {
+                engine_revision: engine.revision(),
+                page_width_q: quantize_editorial_value(layout.page.width),
+                page_height_q: quantize_editorial_value(layout.page.height),
+                drop_cap_width_q: quantize_editorial_value(layout.drop_cap_rect.width),
+            });
+        if let Some(cached) = &self.static_projection_cache {
+            if cached.layout_key == layout_key {
+                return;
             }
         }
 
-        let projection = compute_editorial_projection(
+        self.ensure_pull_quote_prepared(engine);
+        self.ensure_drop_cap_prepared(engine);
+        let pull_quote_prepared = self
+            .pull_quote_prepared
+            .as_ref()
+            .expect("editorial pull quotes should exist");
+        let drop_cap_prepared = self
+            .drop_cap_prepared
+            .as_ref()
+            .expect("editorial drop cap should exist");
+        let projection = compute_static_editorial_projection(
             engine,
-            body_prepared,
             pull_quote_prepared,
             drop_cap_prepared,
             layout,
-            orbs,
         );
-        self.projection_cache = Some(CachedEditorialProjection {
+        self.static_projection_cache = Some(CachedStaticEditorialProjection {
             layout_key,
-            reflow_signature,
-            projection: projection.clone(),
+            projection,
         });
-        projection
     }
+}
+
+fn clamp_texture_size_to_limit(size: [usize; 2], max_texture_side: usize) -> [usize; 2] {
+    let width = size[0].max(1);
+    let height = size[1].max(1);
+    if width <= max_texture_side && height <= max_texture_side {
+        return [width, height];
+    }
+
+    let scale =
+        (max_texture_side as f32 / width as f32).min(max_texture_side as f32 / height as f32);
+    [
+        (width as f32 * scale).round().max(1.0) as usize,
+        (height as f32 * scale).round().max(1.0) as usize,
+    ]
 }
 
 fn normal_options() -> PrepareOptions {
@@ -605,6 +791,20 @@ fn quantize_editorial_value(value: f32) -> u32 {
 
 fn quantize_reflow_bucket(value: f32) -> i32 {
     (value / REFLOW_BUCKET_PX).round() as i32
+}
+
+fn orb_bucket_signature_for_layout(layout: &EditorialLayout, orbs: &[Orb]) -> OrbBucketSignature {
+    OrbBucketSignature {
+        active_orbs: orbs
+            .iter()
+            .take(layout.active_orb_count)
+            .map(|orb| QuantizedOrb {
+                x_q: quantize_reflow_bucket(orb.x),
+                y_q: quantize_reflow_bucket(orb.y),
+                radius_q: quantize_reflow_bucket(orb.radius * layout.orb_radius_scale),
+            })
+            .collect(),
+    }
 }
 
 fn serif_families() -> Vec<String> {
@@ -853,18 +1053,18 @@ fn fit_headline(
         if !breaks_word && total_height <= max_height {
             best_size = size as f32;
             best_line_height = line_height;
-            let layout = engine.layout_with_lines(&prepared, max_width, line_height);
+            let layout = engine.layout_with_runs(&prepared, max_width, line_height);
             best_lines = layout
                 .lines
                 .into_iter()
                 .enumerate()
-                .map(|(index, line)| PositionedLine {
+                .map(|(index, line_with_runs)| PositionedLine {
                     x: 0.0,
                     y: index as f32 * line_height,
-                    width: line.width,
-                    text: line.text.clone(),
-                    visual_runs: engine.line_visual_runs(&prepared, &line),
-                    glyph_runs: engine.line_glyph_runs(&prepared, &line),
+                    width: line_with_runs.line.width,
+                    text: line_with_runs.line.text,
+                    visual_runs: line_with_runs.runs.visual_runs,
+                    glyph_runs: line_with_runs.runs.glyph_runs,
                 })
                 .collect();
             low = size + 1;
@@ -1030,60 +1230,7 @@ fn build_editorial_layout(
     }
 }
 
-fn editorial_reflow_signature(layout: &EditorialLayout, orbs: &[Orb]) -> u64 {
-    use std::hash::{Hash, Hasher};
-
-    let circle_obstacles = orbs
-        .iter()
-        .take(layout.active_orb_count)
-        .map(|orb| CircleObstacle {
-            center: Point { x: orb.x, y: orb.y },
-            radius: orb.radius * layout.orb_radius_scale,
-            horizontal_padding: if layout.is_narrow { 10.0 } else { 14.0 },
-            vertical_padding: if layout.is_narrow { 2.0 } else { 4.0 },
-        })
-        .collect::<Vec<_>>();
-    let mut state = std::collections::hash_map::DefaultHasher::new();
-    layout.active_orb_count.hash(&mut state);
-    layout.column_count.hash(&mut state);
-
-    for (column_index, column) in layout.body_columns.iter().copied().enumerate() {
-        column_index.hash(&mut state);
-        let mut line_top = column.y;
-        while line_top + BODY_LINE_HEIGHT <= column.bottom() {
-            let band_top = line_top;
-            let band_bottom = line_top + BODY_LINE_HEIGHT;
-            let mut intervals = circle_obstacles
-                .iter()
-                .filter_map(|obstacle| {
-                    circle_interval_for_band(
-                        obstacle.center.x,
-                        obstacle.center.y,
-                        obstacle.radius,
-                        band_top,
-                        band_bottom,
-                        obstacle.horizontal_padding,
-                        obstacle.vertical_padding,
-                    )
-                })
-                .collect::<Vec<_>>();
-            intervals.sort_by(|left, right| {
-                left.left
-                    .total_cmp(&right.left)
-                    .then(left.right.total_cmp(&right.right))
-            });
-            intervals.len().hash(&mut state);
-            for interval in intervals {
-                quantize_reflow_bucket(interval.left).hash(&mut state);
-                quantize_reflow_bucket(interval.right).hash(&mut state);
-            }
-            line_top += BODY_LINE_HEIGHT;
-        }
-    }
-
-    state.finish()
-}
-
+#[cfg(test)]
 fn compute_editorial_projection(
     engine: &PretextEngine,
     body_prepared: &PreparedTextWithSegments,
@@ -1092,6 +1239,25 @@ fn compute_editorial_projection(
     layout: &EditorialLayout,
     orbs: &[Orb],
 ) -> EditorialProjection {
+    let static_projection =
+        compute_static_editorial_projection(engine, pull_quote_prepared, drop_cap_prepared, layout);
+    let body_lines =
+        compute_editorial_body_lines(engine, body_prepared, layout, orbs, &static_projection);
+
+    EditorialProjection {
+        headline_lines: static_projection.headline_lines,
+        body_lines,
+        pull_quotes: static_projection.pull_quotes,
+        drop_cap_line: static_projection.drop_cap_line,
+    }
+}
+
+fn compute_static_editorial_projection(
+    engine: &PretextEngine,
+    pull_quote_prepared: &[PreparedTextWithSegments],
+    drop_cap_prepared: &PreparedTextWithSegments,
+    layout: &EditorialLayout,
+) -> StaticEditorialProjection {
     let headline_lines = layout
         .headline_fit
         .lines
@@ -1104,17 +1270,6 @@ fn compute_editorial_projection(
         })
         .collect();
 
-    let circle_obstacles = orbs
-        .iter()
-        .take(layout.active_orb_count)
-        .map(|orb| CircleObstacle {
-            center: Point { x: orb.x, y: orb.y },
-            radius: orb.radius * layout.orb_radius_scale,
-            horizontal_padding: if layout.is_narrow { 10.0 } else { 14.0 },
-            vertical_padding: if layout.is_narrow { 2.0 } else { 4.0 },
-        })
-        .collect::<Vec<_>>();
-
     let placements = pull_quote_placements();
     let mut pull_quotes = Vec::new();
     if !layout.is_narrow {
@@ -1124,11 +1279,8 @@ fn compute_editorial_projection(
             }
             let prepared = &pull_quote_prepared[index];
             let quote_width = (layout.column_width * placement.w_frac).round();
-            let quote_layout = engine.layout_with_lines(
-                prepared,
-                (quote_width - 20.0).max(1.0),
-                QUOTE_LINE_HEIGHT,
-            );
+            let quote_layout =
+                engine.layout_with_runs(prepared, (quote_width - 20.0).max(1.0), QUOTE_LINE_HEIGHT);
             let quote_height = quote_layout.lines.len() as f32 * QUOTE_LINE_HEIGHT + 16.0;
             let column_x = layout.content_left
                 + placement.col_idx as f32 * (layout.column_width + layout.col_gap);
@@ -1141,13 +1293,13 @@ fn compute_editorial_projection(
                 .lines
                 .into_iter()
                 .enumerate()
-                .map(|(line_index, line)| PositionedLine {
+                .map(|(line_index, line_with_runs)| PositionedLine {
                     x: quote_x + 20.0,
                     y: quote_y + 8.0 + line_index as f32 * QUOTE_LINE_HEIGHT,
-                    width: line.width,
-                    text: line.text.clone(),
-                    visual_runs: engine.line_visual_runs(prepared, &line),
-                    glyph_runs: engine.line_glyph_runs(prepared, &line),
+                    width: line_with_runs.line.width,
+                    text: line_with_runs.line.text,
+                    visual_runs: line_with_runs.runs.visual_runs,
+                    glyph_runs: line_with_runs.runs.glyph_runs,
                 })
                 .collect();
 
@@ -1163,60 +1315,539 @@ fn compute_editorial_projection(
             });
         }
     }
-
-    let mut body_lines = Vec::new();
-    let mut cursor = BODY_START_CURSOR;
-    for (column_index, column) in layout.body_columns.iter().copied().enumerate() {
-        let mut rect_obstacles = Vec::new();
-        if column_index == 0 {
-            rect_obstacles.push(RectObstacle {
-                rect: layout.drop_cap_rect,
-            });
-        }
-        for pull_quote in &pull_quotes {
-            if pull_quote.col_idx != column_index {
-                continue;
-            }
-            rect_obstacles.push(RectObstacle {
-                rect: pull_quote.rect,
-            });
-        }
-
-        let (mut lines, next_cursor) = layout_column(
-            engine,
-            body_prepared,
-            cursor,
-            column,
-            BODY_LINE_HEIGHT,
-            &circle_obstacles,
-            &rect_obstacles,
-            layout.is_narrow,
-        );
-        body_lines.append(&mut lines);
-        cursor = next_cursor;
-    }
+    let body_rect_obstacles = build_static_body_rect_obstacles(layout, &pull_quotes);
 
     let mut drop_cap_cursor = LayoutCursor::default();
     let drop_cap_line = engine
-        .layout_next_line(drop_cap_prepared, &mut drop_cap_cursor, UNBOUNDED_WIDTH)
+        .layout_next_line_with_runs(drop_cap_prepared, &mut drop_cap_cursor, UNBOUNDED_WIDTH)
         .map(|line| PositionedLine {
             x: layout.content_left,
             y: layout.body_top,
-            width: line.width,
-            text: line.text.clone(),
-            visual_runs: engine.line_visual_runs(drop_cap_prepared, &line),
-            glyph_runs: engine.line_glyph_runs(drop_cap_prepared, &line),
+            width: line.line.width,
+            text: line.line.text,
+            visual_runs: line.runs.visual_runs,
+            glyph_runs: line.runs.glyph_runs,
         })
         .expect("drop cap line should fit");
 
-    EditorialProjection {
+    StaticEditorialProjection {
         headline_lines,
-        body_lines,
         pull_quotes,
         drop_cap_line,
+        body_rect_obstacles,
     }
 }
 
+fn build_static_body_rect_obstacles(
+    layout: &EditorialLayout,
+    pull_quotes: &[PullQuoteBox],
+) -> Vec<Box<[RectObstacle]>> {
+    let mut rect_obstacles = vec![Vec::new(); layout.body_columns.len()];
+    if let Some(first_column) = rect_obstacles.first_mut() {
+        first_column.push(RectObstacle {
+            rect: layout.drop_cap_rect,
+        });
+    }
+    for pull_quote in pull_quotes {
+        if let Some(column) = rect_obstacles.get_mut(pull_quote.col_idx) {
+            column.push(RectObstacle {
+                rect: pull_quote.rect,
+            });
+        }
+    }
+    rect_obstacles
+        .into_iter()
+        .map(Vec::into_boxed_slice)
+        .collect()
+}
+
+#[cfg(test)]
+fn compute_editorial_body_lines(
+    engine: &PretextEngine,
+    body_prepared: &PreparedTextWithSegments,
+    layout: &EditorialLayout,
+    orbs: &[Orb],
+    static_projection: &StaticEditorialProjection,
+) -> Vec<PositionedLine> {
+    let plans = build_body_column_plans(layout, orbs, static_projection);
+    let mut body_lines = Vec::new();
+    let mut cursor = BODY_START_CURSOR;
+
+    for column in plans {
+        for band in column.bands {
+            let band_layout = layout_body_band(engine, body_prepared, cursor, &band, Vec::new());
+            cursor = band_layout.output_cursor;
+            body_lines.extend(band_layout.lines);
+        }
+    }
+
+    body_lines
+}
+
+#[cfg(test)]
+fn compute_incremental_body_projection(
+    engine: &PretextEngine,
+    body_prepared: &PreparedTextWithSegments,
+    layout: &EditorialLayout,
+    orbs: &[Orb],
+    static_projection: &StaticEditorialProjection,
+    cached: Option<CachedEditorialBodyProjection>,
+) -> (
+    Vec<PositionedLine>,
+    CachedEditorialBodyProjection,
+    EditorialBodyCacheStats,
+) {
+    let layout_key = EditorialLayoutKey {
+        engine_revision: engine.revision(),
+        page_width_q: quantize_editorial_value(layout.page.width),
+        page_height_q: quantize_editorial_value(layout.page.height),
+        drop_cap_width_q: quantize_editorial_value(layout.drop_cap_rect.width),
+    };
+    let orb_bucket_signature = orb_bucket_signature_for_layout(layout, orbs);
+    let (cache, stats) = compute_incremental_body_projection_cache(
+        engine,
+        body_prepared,
+        layout,
+        orbs,
+        static_projection,
+        layout_key,
+        orb_bucket_signature,
+        cached,
+    );
+    let body_lines = flatten_cached_body_columns(&cache.columns);
+    (body_lines, cache, stats)
+}
+
+fn compute_incremental_body_projection_cache(
+    engine: &PretextEngine,
+    body_prepared: &PreparedTextWithSegments,
+    layout: &EditorialLayout,
+    orbs: &[Orb],
+    static_projection: &StaticEditorialProjection,
+    layout_key: EditorialLayoutKey,
+    orb_bucket_signature: OrbBucketSignature,
+    cached: Option<CachedEditorialBodyProjection>,
+) -> (CachedEditorialBodyProjection, EditorialBodyCacheStats) {
+    let circle_obstacles = circle_obstacles_for_layout(layout, orbs);
+    let mut cached_plans = None;
+    let mut previous_circle_obstacles = None;
+    let mut cached_columns = Vec::new();
+    if let Some(cached) = cached {
+        let CachedEditorialBodyProjection {
+            columns,
+            plans,
+            circle_obstacles,
+            ..
+        } = cached;
+        cached_columns = columns;
+        cached_plans = Some(plans);
+        previous_circle_obstacles = Some(circle_obstacles);
+    }
+    let plans = build_body_column_plans_incremental(
+        layout,
+        &circle_obstacles,
+        static_projection,
+        cached_plans,
+        previous_circle_obstacles.as_deref(),
+    );
+    let mut columns = Vec::with_capacity(plans.len());
+    let mut cursor = BODY_START_CURSOR;
+    let mut stats = EditorialBodyCacheStats::default();
+
+    for (column_index, plan) in plans.iter().enumerate() {
+        let mut bands = if column_index < cached_columns.len() {
+            std::mem::take(&mut cached_columns[column_index].bands)
+        } else {
+            Vec::new()
+        };
+        if bands.len() > plan.bands.len() {
+            bands.truncate(plan.bands.len());
+        } else if bands.len() < plan.bands.len() {
+            bands.reserve(plan.bands.len() - bands.len());
+        }
+        let mut first_dirty = None;
+
+        for (band_index, band_plan) in plan.bands.iter().enumerate() {
+            let reused = bands.get(band_index).is_some_and(|band| {
+                band.input_cursor == cursor && band.signature == band_plan.signature
+            });
+
+            if !reused {
+                if first_dirty.is_none() {
+                    first_dirty = Some(band_index);
+                }
+                let recycled_lines = bands
+                    .get_mut(band_index)
+                    .map(|band| std::mem::take(&mut band.lines))
+                    .unwrap_or_default();
+                let band =
+                    layout_body_band(engine, body_prepared, cursor, band_plan, recycled_lines);
+                if band_index < bands.len() {
+                    bands[band_index] = band;
+                } else {
+                    bands.push(band);
+                }
+            }
+            let band = &bands[band_index];
+            cursor = band.output_cursor;
+        }
+
+        if let Some(first_dirty) = first_dirty {
+            stats.dirty_bands += plan.bands.len().saturating_sub(first_dirty);
+            if first_dirty == 0 {
+                stats.full_recomputes += 1;
+            }
+        }
+
+        columns.push(CachedEditorialBodyColumn { bands });
+    }
+
+    (
+        CachedEditorialBodyProjection {
+            layout_key,
+            orb_bucket_signature,
+            plans,
+            circle_obstacles,
+            columns,
+        },
+        stats,
+    )
+}
+
+#[cfg(test)]
+fn flatten_cached_body_columns(columns: &[CachedEditorialBodyColumn]) -> Vec<PositionedLine> {
+    columns
+        .iter()
+        .flat_map(|column| column.bands.iter())
+        .flat_map(|band| band.lines.iter().cloned())
+        .collect()
+}
+
+#[cfg(test)]
+fn build_body_column_plans(
+    layout: &EditorialLayout,
+    orbs: &[Orb],
+    static_projection: &StaticEditorialProjection,
+) -> Vec<BodyColumnPlan> {
+    let circle_obstacles = circle_obstacles_for_layout(layout, orbs);
+    build_body_column_plans_incremental(layout, &circle_obstacles, static_projection, None, None)
+}
+
+fn build_body_column_plans_incremental(
+    layout: &EditorialLayout,
+    circle_obstacles: &[CircleObstacle],
+    static_projection: &StaticEditorialProjection,
+    cached_plans: Option<Vec<BodyColumnPlan>>,
+    previous_circle_obstacles: Option<&[CircleObstacle]>,
+) -> Vec<BodyColumnPlan> {
+    let mut scratch = EditorialBandScratch::default();
+    let mut plans = Vec::with_capacity(layout.body_columns.len());
+    let mut cached_plans = cached_plans.unwrap_or_default();
+    debug_assert_eq!(
+        static_projection.body_rect_obstacles.len(),
+        layout.body_columns.len()
+    );
+
+    for (column_index, (column, rect_obstacles)) in layout
+        .body_columns
+        .iter()
+        .copied()
+        .zip(static_projection.body_rect_obstacles.iter())
+        .enumerate()
+    {
+        let cached_plan = if column_index < cached_plans.len() {
+            Some(std::mem::take(&mut cached_plans[column_index]))
+        } else {
+            None
+        };
+        let dirty_range = previous_circle_obstacles.and_then(|previous| {
+            body_plan_dirty_range_for_changed_circles(column, circle_obstacles, previous)
+        });
+        plans.push(build_body_column_plan_incremental(
+            column,
+            circle_obstacles,
+            &rect_obstacles,
+            layout.is_narrow,
+            cached_plan,
+            dirty_range,
+            &mut scratch,
+        ));
+    }
+
+    plans
+}
+
+fn circle_obstacles_for_layout(layout: &EditorialLayout, orbs: &[Orb]) -> Vec<CircleObstacle> {
+    orbs.iter()
+        .take(layout.active_orb_count)
+        .map(|orb| CircleObstacle {
+            center: Point { x: orb.x, y: orb.y },
+            radius: orb.radius * layout.orb_radius_scale,
+            horizontal_padding: if layout.is_narrow { 10.0 } else { 14.0 },
+            vertical_padding: if layout.is_narrow { 2.0 } else { 4.0 },
+        })
+        .collect()
+}
+
+fn build_body_column_plan_incremental(
+    column: GeoRect,
+    circle_obstacles: &[CircleObstacle],
+    rect_obstacles: &[RectObstacle],
+    single_slot_only: bool,
+    cached: Option<BodyColumnPlan>,
+    dirty_range: Option<(usize, usize)>,
+    scratch: &mut EditorialBandScratch,
+) -> BodyColumnPlan {
+    let Some(mut cached) = cached else {
+        return build_body_column_plan(
+            column,
+            circle_obstacles,
+            rect_obstacles,
+            single_slot_only,
+            scratch,
+        );
+    };
+    if !body_column_plan_matches_region(&cached, column) {
+        return build_body_column_plan(
+            column,
+            circle_obstacles,
+            rect_obstacles,
+            single_slot_only,
+            scratch,
+        );
+    }
+    let Some((dirty_start, dirty_end)) = dirty_range else {
+        return cached;
+    };
+
+    for band_index in dirty_start..=dirty_end {
+        let line_top = column.y + band_index as f32 * BODY_LINE_HEIGHT;
+        cached.bands[band_index] = build_body_band_plan(
+            column,
+            line_top,
+            circle_obstacles,
+            rect_obstacles,
+            single_slot_only,
+            scratch,
+        );
+    }
+    cached
+}
+
+fn build_body_column_plan(
+    column: GeoRect,
+    circle_obstacles: &[CircleObstacle],
+    rect_obstacles: &[RectObstacle],
+    single_slot_only: bool,
+    scratch: &mut EditorialBandScratch,
+) -> BodyColumnPlan {
+    let mut bands = Vec::new();
+    let mut line_top = column.y;
+    while line_top + BODY_LINE_HEIGHT <= column.bottom() {
+        bands.push(build_body_band_plan(
+            column,
+            line_top,
+            circle_obstacles,
+            rect_obstacles,
+            single_slot_only,
+            scratch,
+        ));
+        line_top += BODY_LINE_HEIGHT;
+    }
+    BodyColumnPlan { bands }
+}
+
+fn body_column_plan_matches_region(plan: &BodyColumnPlan, column: GeoRect) -> bool {
+    if plan.bands.len() != body_column_band_count(column) {
+        return false;
+    }
+    plan.bands.iter().enumerate().all(|(band_index, band)| {
+        let expected_top = column.y + band_index as f32 * BODY_LINE_HEIGHT;
+        (band.line_top - expected_top).abs() <= 0.5
+    })
+}
+
+fn body_column_band_count(column: GeoRect) -> usize {
+    (((column.bottom() - column.y) / BODY_LINE_HEIGHT)
+        .floor()
+        .max(0.0)) as usize
+}
+
+fn body_plan_dirty_range_for_changed_circles(
+    column: GeoRect,
+    current: &[CircleObstacle],
+    previous: &[CircleObstacle],
+) -> Option<(usize, usize)> {
+    let mut top = f32::INFINITY;
+    let mut bottom = f32::NEG_INFINITY;
+    let total = current.len().max(previous.len());
+
+    for index in 0..total {
+        let current = current.get(index).copied();
+        let previous = previous.get(index).copied();
+        if current == previous {
+            continue;
+        }
+        if let Some(obstacle) = current {
+            let (span_top, span_bottom) = circle_obstacle_vertical_span(obstacle);
+            top = top.min(span_top);
+            bottom = bottom.max(span_bottom);
+        }
+        if let Some(obstacle) = previous {
+            let (span_top, span_bottom) = circle_obstacle_vertical_span(obstacle);
+            top = top.min(span_top);
+            bottom = bottom.max(span_bottom);
+        }
+    }
+
+    if !top.is_finite() || !bottom.is_finite() {
+        return None;
+    }
+    body_column_band_range_for_span(column, top, bottom)
+}
+
+fn circle_obstacle_vertical_span(obstacle: CircleObstacle) -> (f32, f32) {
+    (
+        obstacle.center.y - obstacle.radius - obstacle.vertical_padding,
+        obstacle.center.y + obstacle.radius + obstacle.vertical_padding,
+    )
+}
+
+fn body_column_band_range_for_span(
+    column: GeoRect,
+    span_top: f32,
+    span_bottom: f32,
+) -> Option<(usize, usize)> {
+    if span_bottom <= column.y || span_top >= column.bottom() {
+        return None;
+    }
+
+    let band_count = body_column_band_count(column);
+    if band_count == 0 {
+        return None;
+    }
+
+    let first = (((span_top - column.y) / BODY_LINE_HEIGHT).floor() as isize - 1)
+        .clamp(0, band_count as isize - 1) as usize;
+    let last = (((span_bottom - column.y) / BODY_LINE_HEIGHT).ceil() as isize - 1)
+        .clamp(0, band_count as isize - 1) as usize;
+    if first > last {
+        None
+    } else {
+        Some((first, last))
+    }
+}
+
+fn build_body_band_plan(
+    region: GeoRect,
+    line_top: f32,
+    circle_obstacles: &[CircleObstacle],
+    rect_obstacles: &[RectObstacle],
+    single_slot_only: bool,
+    scratch: &mut EditorialBandScratch,
+) -> BodyBandPlan {
+    let band_top = line_top;
+    let band_bottom = line_top + BODY_LINE_HEIGHT;
+    append_body_band_intervals(
+        &mut scratch.blocked,
+        band_top,
+        band_bottom,
+        circle_obstacles,
+        rect_obstacles,
+    );
+    carve_editorial_slots_into(
+        Interval {
+            left: region.x,
+            right: region.right(),
+        },
+        &scratch.blocked,
+        &mut scratch.slots,
+        &mut scratch.scratch_slots,
+    );
+    let ordered_slots = if single_slot_only {
+        scratch
+            .slots
+            .iter()
+            .copied()
+            .reduce(|best, slot| {
+                let best_width = best.right - best.left;
+                let slot_width = slot.right - slot.left;
+                if slot_width > best_width {
+                    slot
+                } else if slot_width < best_width {
+                    best
+                } else if slot.left < best.left {
+                    slot
+                } else {
+                    best
+                }
+            })
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        let mut ordered = scratch.slots.clone();
+        ordered.sort_by(|a, b| a.left.total_cmp(&b.left));
+        ordered
+    };
+
+    BodyBandPlan {
+        line_top,
+        signature: BandSlotSignature {
+            slots: ordered_slots
+                .iter()
+                .map(|slot| QuantizedInterval {
+                    left_q: quantize_reflow_bucket(slot.left),
+                    right_q: quantize_reflow_bucket(slot.right),
+                })
+                .collect(),
+        },
+        slots: ordered_slots,
+    }
+}
+
+fn layout_body_band(
+    engine: &PretextEngine,
+    prepared: &PreparedTextWithSegments,
+    input_cursor: LayoutCursor,
+    band: &BodyBandPlan,
+    mut lines: Vec<PositionedLine>,
+) -> CachedEditorialBodyBand {
+    let mut cursor = input_cursor;
+    lines.clear();
+
+    for slot in &band.slots {
+        let mut next_cursor = cursor;
+        let Some(line) = engine.layout_next_line_with_runs(
+            prepared,
+            &mut next_cursor,
+            (slot.right - slot.left).max(1.0),
+        ) else {
+            break;
+        };
+        if next_cursor == cursor {
+            break;
+        }
+
+        lines.push(PositionedLine {
+            x: slot.left.round(),
+            y: band.line_top.round(),
+            width: line.line.width,
+            text: line.line.text,
+            visual_runs: line.runs.visual_runs,
+            glyph_runs: line.runs.glyph_runs,
+        });
+        cursor = next_cursor;
+    }
+
+    CachedEditorialBodyBand {
+        input_cursor,
+        signature: band.signature.clone(),
+        lines,
+        output_cursor: cursor,
+    }
+}
+
+#[cfg(test)]
 fn layout_column(
     engine: &PretextEngine,
     prepared: &PreparedTextWithSegments,
@@ -1231,51 +1862,37 @@ fn layout_column(
     let mut line_top = region.y;
     let mut lines = Vec::new();
     let mut text_exhausted = false;
+    let mut scratch = EditorialBandScratch::default();
 
     while line_top + line_height <= region.bottom() && !text_exhausted {
         let band_top = line_top;
         let band_bottom = line_top + line_height;
-        let mut blocked = Vec::new();
-
-        for obstacle in circle_obstacles {
-            if let Some(interval) = circle_interval_for_band(
-                obstacle.center.x,
-                obstacle.center.y,
-                obstacle.radius,
-                band_top,
-                band_bottom,
-                obstacle.horizontal_padding,
-                obstacle.vertical_padding,
-            ) {
-                blocked.push(interval);
-            }
-        }
-
-        for obstacle in rect_obstacles {
-            if band_bottom <= obstacle.rect.y || band_top >= obstacle.rect.bottom() {
-                continue;
-            }
-            blocked.push(Interval {
-                left: obstacle.rect.x,
-                right: obstacle.rect.right(),
-            });
-        }
-
-        let slots = carve_editorial_slots(
+        append_body_band_intervals(
+            &mut scratch.blocked,
+            band_top,
+            band_bottom,
+            circle_obstacles,
+            rect_obstacles,
+        );
+        carve_editorial_slots_into(
             Interval {
                 left: region.x,
                 right: region.right(),
             },
-            &blocked,
+            &scratch.blocked,
+            &mut scratch.slots,
+            &mut scratch.scratch_slots,
         );
-        if slots.is_empty() {
+        if scratch.slots.is_empty() {
             line_top += line_height;
             continue;
         }
 
         let ordered_slots = if single_slot_only {
-            vec![slots
-                .into_iter()
+            vec![scratch
+                .slots
+                .iter()
+                .copied()
                 .reduce(|best, slot| {
                     let best_width = best.right - best.left;
                     let slot_width = slot.right - slot.left;
@@ -1291,14 +1908,14 @@ fn layout_column(
                 })
                 .expect("single slot should exist")]
         } else {
-            let mut ordered = slots;
+            let mut ordered = scratch.slots.clone();
             ordered.sort_by(|a, b| a.left.total_cmp(&b.left));
             ordered
         };
 
         for slot in ordered_slots {
             let mut next_cursor = cursor;
-            let Some(line) = engine.layout_next_line(
+            let Some(line) = engine.layout_next_line_with_runs(
                 prepared,
                 &mut next_cursor,
                 (slot.right - slot.left).max(1.0),
@@ -1314,10 +1931,10 @@ fn layout_column(
             lines.push(PositionedLine {
                 x: slot.left.round(),
                 y: line_top.round(),
-                width: line.width,
-                text: line.text.clone(),
-                visual_runs: engine.line_visual_runs(prepared, &line),
-                glyph_runs: engine.line_glyph_runs(prepared, &line),
+                width: line.line.width,
+                text: line.line.text,
+                visual_runs: line.runs.visual_runs,
+                glyph_runs: line.runs.glyph_runs,
             });
             cursor = next_cursor;
         }
@@ -1328,36 +1945,83 @@ fn layout_column(
     (lines, cursor)
 }
 
-fn carve_editorial_slots(base: Interval, blocked: &[Interval]) -> Vec<Interval> {
-    let mut slots = vec![base];
+fn append_body_band_intervals(
+    blocked: &mut Vec<Interval>,
+    band_top: f32,
+    band_bottom: f32,
+    circle_obstacles: &[CircleObstacle],
+    rect_obstacles: &[RectObstacle],
+) {
+    blocked.clear();
+
+    for obstacle in circle_obstacles {
+        if let Some(interval) = circle_interval_for_band(
+            obstacle.center.x,
+            obstacle.center.y,
+            obstacle.radius,
+            band_top,
+            band_bottom,
+            obstacle.horizontal_padding,
+            obstacle.vertical_padding,
+        ) {
+            blocked.push(interval);
+        }
+    }
+
+    for obstacle in rect_obstacles {
+        if band_bottom <= obstacle.rect.y || band_top >= obstacle.rect.bottom() {
+            continue;
+        }
+        blocked.push(Interval {
+            left: obstacle.rect.x,
+            right: obstacle.rect.right(),
+        });
+    }
+}
+
+fn carve_editorial_slots_into(
+    base: Interval,
+    blocked: &[Interval],
+    slots: &mut Vec<Interval>,
+    scratch: &mut Vec<Interval>,
+) {
+    slots.clear();
+    slots.push(base);
+    scratch.clear();
 
     for interval in blocked {
-        let mut next = Vec::new();
-        for slot in slots {
+        scratch.clear();
+        for slot in slots.iter().copied() {
             if interval.right <= slot.left || interval.left >= slot.right {
-                next.push(slot);
+                scratch.push(slot);
                 continue;
             }
             if interval.left > slot.left {
-                next.push(Interval {
+                scratch.push(Interval {
                     left: slot.left,
                     right: interval.left,
                 });
             }
             if interval.right < slot.right {
-                next.push(Interval {
+                scratch.push(Interval {
                     left: interval.right,
                     right: slot.right,
                 });
             }
         }
-        slots = next;
+        std::mem::swap(slots, scratch);
     }
 
+    slots.retain(|slot| slot.right - slot.left >= MIN_SLOT_WIDTH);
+    scratch.clear();
+}
+
+#[cfg(test)]
+fn carve_editorial_slots(base: Interval, blocked: &[Interval]) -> Vec<Interval> {
+    let mut slots = Vec::new();
+    let mut scratch = Vec::new();
+    carve_editorial_slots_into(base, blocked, &mut slots, &mut scratch);
     slots
-        .into_iter()
-        .filter(|slot| slot.right - slot.left >= MIN_SLOT_WIDTH)
-        .collect()
 }
 
 fn circle_interval_for_band(
@@ -1402,14 +2066,14 @@ fn build_positioned_single_line(
 ) -> Option<PositionedLine> {
     let prepared = engine.prepare_with_segments(text, style, &normal_options());
     let mut cursor = LayoutCursor::default();
-    let line = engine.layout_next_line(&prepared, &mut cursor, UNBOUNDED_WIDTH)?;
+    let line = engine.layout_next_line_with_runs(&prepared, &mut cursor, UNBOUNDED_WIDTH)?;
     Some(PositionedLine {
         x,
         y,
-        width: line.width,
-        text: line.text.clone(),
-        visual_runs: engine.line_visual_runs(&prepared, &line),
-        glyph_runs: engine.line_glyph_runs(&prepared, &line),
+        width: line.line.width,
+        text: line.line.text,
+        visual_runs: line.runs.visual_runs,
+        glyph_runs: line.runs.glyph_runs,
     })
 }
 
@@ -1589,40 +2253,55 @@ fn paint_editorial_background(painter: &egui::Painter, rect: Rect, texture: &Tex
 
 fn paint_projection(
     painter: &egui::Painter,
-    projection: &EditorialProjection,
+    projection: EditorialProjectionRef<'_>,
     layout: &EditorialLayout,
     ctx: &egui::Context,
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
-    paint_positioned_lines(
-        painter,
-        &projection.headline_lines,
-        &headline_style(layout.headline_fit.font_size),
+    let headline_text_style = headline_style(layout.headline_fit.font_size);
+    let drop_cap_text_style = drop_cap_style();
+    let quote_text_style = quote_style();
+    let body_text_style = body_style();
+    let headline_options = fragment_paint_options(
+        &headline_text_style,
         layout.headline_fit.line_height,
-        headline_render_slack_y(
-            layout.headline_fit.font_size,
-            layout.headline_fit.line_height,
-        ),
         Color32::WHITE,
-        ctx,
-        engine,
-        assets,
     );
-
-    paint_positioned_lines(
-        painter,
-        std::slice::from_ref(&projection.drop_cap_line),
-        &drop_cap_style(),
+    let drop_cap_options = fragment_paint_options(
+        &drop_cap_text_style,
         BODY_LINE_HEIGHT * DROP_CAP_LINES as f32 - 4.0,
-        6.0,
         Color32::from_rgb(196, 163, 90),
+    );
+    let quote_options = fragment_paint_options(
+        &quote_text_style,
+        QUOTE_LINE_HEIGHT,
+        Color32::from_rgb(184, 160, 112),
+    );
+    let body_options = fragment_paint_options(
+        &body_text_style,
+        BODY_LINE_HEIGHT,
+        Color32::from_rgb(232, 228, 220),
+    );
+    let mut fragment_painter = PretextFragmentPainter::new(assets);
+    queue_positioned_lines(
+        &mut fragment_painter,
+        projection.headline_lines.iter(),
+        &headline_options,
+        ctx,
+        engine,
+        assets,
+    );
+    queue_positioned_lines(
+        &mut fragment_painter,
+        std::slice::from_ref(projection.drop_cap_line),
+        &drop_cap_options,
         ctx,
         engine,
         assets,
     );
 
-    for pull_quote in &projection.pull_quotes {
+    for pull_quote in projection.pull_quotes {
         painter.line_segment(
             [
                 egui::pos2(pull_quote.rect.x, pull_quote.rect.y),
@@ -1630,30 +2309,29 @@ fn paint_projection(
             ],
             Stroke::new(3.0, Color32::from_rgb(107, 90, 61)),
         );
-        paint_positioned_lines(
-            painter,
-            &pull_quote.lines,
-            &quote_style(),
-            QUOTE_LINE_HEIGHT,
-            2.0,
-            Color32::from_rgb(184, 160, 112),
+        queue_positioned_lines(
+            &mut fragment_painter,
+            pull_quote.lines.iter(),
+            &quote_options,
             ctx,
             engine,
             assets,
         );
     }
 
-    paint_positioned_lines(
-        painter,
-        &projection.body_lines,
-        &body_style(),
-        BODY_LINE_HEIGHT,
-        2.0,
-        Color32::from_rgb(232, 228, 220),
+    queue_positioned_lines(
+        &mut fragment_painter,
+        projection
+            .body_columns
+            .iter()
+            .flat_map(|column| column.bands.iter())
+            .flat_map(|band| band.lines.iter()),
+        &body_options,
         ctx,
         engine,
         assets,
     );
+    let _ = fragment_painter.finish(painter, ctx, assets);
 }
 
 fn paint_positioned_lines(
@@ -1667,25 +2345,71 @@ fn paint_positioned_lines(
     engine: &PretextEngine,
     assets: &mut AssetRegistry,
 ) {
+    paint_positioned_line_iter(
+        painter,
+        lines.iter(),
+        style,
+        line_height,
+        _slack_y,
+        color,
+        ctx,
+        engine,
+        assets,
+    );
+}
+
+fn paint_positioned_line_iter<'a>(
+    painter: &egui::Painter,
+    lines: impl IntoIterator<Item = &'a PositionedLine>,
+    style: &pretext::TextStyleSpec,
+    line_height: f32,
+    _slack_y: f32,
+    color: Color32,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+) {
+    let options = fragment_paint_options(style, line_height, color);
+    let mut fragment_painter = PretextFragmentPainter::new(assets);
+    queue_positioned_lines(&mut fragment_painter, lines, &options, ctx, engine, assets);
+    let _ = fragment_painter.finish(painter, ctx, assets);
+}
+
+fn fragment_paint_options(
+    style: &pretext::TextStyleSpec,
+    line_height: f32,
+    color: Color32,
+) -> PretextFragmentPaintOptions<'_> {
+    PretextFragmentPaintOptions::new(style, line_height)
+        .color(color)
+        .fallback_font(egui::FontId::new(
+            style.size_px,
+            egui::FontFamily::Proportional,
+        ))
+        .fallback_align(egui::Align2::LEFT_TOP)
+}
+
+fn queue_positioned_lines<'a>(
+    fragment_painter: &mut PretextFragmentPainter,
+    lines: impl IntoIterator<Item = &'a PositionedLine>,
+    options: &PretextFragmentPaintOptions<'_>,
+    ctx: &egui::Context,
+    engine: &PretextEngine,
+    assets: &mut AssetRegistry,
+) {
     for line in lines {
-        paint_glyph_runs(
-            painter,
+        fragment_painter.push_fragment(
             line.x,
             line.y,
             &line.text,
             &line.glyph_runs,
-            style,
-            line_height,
-            color,
+            &[],
+            options,
             ctx,
             engine,
             assets,
         );
     }
-}
-
-fn headline_render_slack_y(font_size: f32, line_height: f32) -> f32 {
-    ((font_size - line_height).max(0.0) + 8.0).round()
 }
 
 fn paint_orbs(
@@ -1793,6 +2517,58 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../pretext_js/pages/demos/editorial-engine.ts"
     ));
+
+    fn editorial_test_inputs(
+        page: GeoRect,
+    ) -> (
+        PretextEngine,
+        PreparedTextWithSegments,
+        Vec<PreparedTextWithSegments>,
+        PreparedTextWithSegments,
+        EditorialLayout,
+        StaticEditorialProjection,
+        Vec<Orb>,
+    ) {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let body = engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options());
+        let pull_quotes = PULL_QUOTE_TEXTS
+            .iter()
+            .map(|text| engine.prepare_with_segments(text, &quote_style(), &normal_options()))
+            .collect::<Vec<_>>();
+        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let layout = build_editorial_layout(
+            page,
+            &engine,
+            measure_single_line_width(&engine, &drop_cap).ceil() + 10.0,
+        );
+        let static_projection =
+            compute_static_editorial_projection(&engine, &pull_quotes, &drop_cap, &layout);
+        let orbs = orb_definitions()
+            .iter()
+            .map(|definition| Orb {
+                x: page.width * definition.fx,
+                y: page.height * definition.fy,
+                radius: definition.radius,
+                vx: definition.vx,
+                vy: definition.vy,
+                rgb: definition.rgb,
+                paused: false,
+            })
+            .collect::<Vec<_>>();
+
+        (
+            engine,
+            body,
+            pull_quotes,
+            drop_cap,
+            layout,
+            static_projection,
+            orbs,
+        )
+    }
 
     #[test]
     fn orb_obstacles_change_editorial_projection() {
@@ -1974,6 +2750,283 @@ mod tests {
     }
 
     #[test]
+    fn layout_body_band_reuses_supplied_line_storage() {
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let prepared = engine.prepare_with_segments(
+            "This paragraph is long enough to produce different first-line fits when the slot width changes between otherwise identical editorial bands.",
+            &body_style(),
+            &normal_options(),
+        );
+        let initial_band = BodyBandPlan {
+            line_top: 120.0,
+            signature: BandSlotSignature {
+                slots: vec![QuantizedInterval {
+                    left_q: quantize_reflow_bucket(40.0),
+                    right_q: quantize_reflow_bucket(240.0),
+                }],
+            },
+            slots: vec![Interval {
+                left: 40.0,
+                right: 240.0,
+            }],
+        };
+        let next_band = BodyBandPlan {
+            line_top: 120.0,
+            signature: BandSlotSignature {
+                slots: vec![QuantizedInterval {
+                    left_q: quantize_reflow_bucket(40.0),
+                    right_q: quantize_reflow_bucket(180.0),
+                }],
+            },
+            slots: vec![Interval {
+                left: 40.0,
+                right: 180.0,
+            }],
+        };
+
+        let first = layout_body_band(
+            &engine,
+            &prepared,
+            BODY_START_CURSOR,
+            &initial_band,
+            Vec::new(),
+        );
+        assert!(!first.lines.is_empty());
+        let baseline_ptr = first.lines.as_ptr();
+        let baseline_lines = first.lines.clone();
+
+        let second = layout_body_band(
+            &engine,
+            &prepared,
+            BODY_START_CURSOR,
+            &next_band,
+            first.lines,
+        );
+
+        assert!(!second.lines.is_empty());
+        assert_eq!(second.lines.as_ptr(), baseline_ptr);
+        assert_ne!(baseline_lines, second.lines);
+    }
+
+    #[test]
+    fn editorial_slot_carve_into_matches_allocating_variant() {
+        let base = Interval {
+            left: 40.0,
+            right: 420.0,
+        };
+        let blocked = [
+            Interval {
+                left: 60.0,
+                right: 90.0,
+            },
+            Interval {
+                left: 130.0,
+                right: 210.0,
+            },
+            Interval {
+                left: 260.0,
+                right: 320.0,
+            },
+        ];
+        let expected = carve_editorial_slots(base, &blocked);
+        let mut slots = vec![Interval {
+            left: 0.0,
+            right: 1.0,
+        }];
+        let mut scratch = vec![Interval {
+            left: 2.0,
+            right: 3.0,
+        }];
+
+        carve_editorial_slots_into(base, &blocked, &mut slots, &mut scratch);
+
+        assert_eq!(slots, expected);
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn incremental_body_projection_reuses_cached_bands_within_same_bucket() {
+        let page = GeoRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 760.0,
+        };
+        let (engine, body, _pull_quotes, _drop_cap, layout, static_projection, orbs) =
+            editorial_test_inputs(page);
+
+        let (first_lines, first_cache, first_stats) = compute_incremental_body_projection(
+            &engine,
+            &body,
+            &layout,
+            &orbs,
+            &static_projection,
+            None,
+        );
+        let mut nudged_orbs = orbs.clone();
+        nudged_orbs[0].x += 0.1;
+        nudged_orbs[0].y += 0.1;
+
+        let (second_lines, _second_cache, second_stats) = compute_incremental_body_projection(
+            &engine,
+            &body,
+            &layout,
+            &nudged_orbs,
+            &static_projection,
+            Some(first_cache),
+        );
+
+        assert!(first_stats.dirty_bands > 0);
+        assert_eq!(second_stats.dirty_bands, 0);
+        assert_eq!(second_stats.full_recomputes, 0);
+        assert_eq!(first_lines, second_lines);
+    }
+
+    #[test]
+    fn incremental_body_projection_matches_fresh_after_bucket_change() {
+        let page = GeoRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 760.0,
+        };
+        let (engine, body, _pull_quotes, _drop_cap, layout, static_projection, orbs) =
+            editorial_test_inputs(page);
+
+        let (_baseline_lines, baseline_cache, _baseline_stats) =
+            compute_incremental_body_projection(
+                &engine,
+                &body,
+                &layout,
+                &orbs,
+                &static_projection,
+                None,
+            );
+        let mut moved_orbs = orbs.clone();
+        moved_orbs[1].y += BODY_LINE_HEIGHT * 1.2;
+
+        let (incremental_lines, _incremental_cache, incremental_stats) =
+            compute_incremental_body_projection(
+                &engine,
+                &body,
+                &layout,
+                &moved_orbs,
+                &static_projection,
+                Some(baseline_cache),
+            );
+        let fresh_lines =
+            compute_editorial_body_lines(&engine, &body, &layout, &moved_orbs, &static_projection);
+
+        assert!(incremental_stats.dirty_bands > 0);
+        assert_eq!(incremental_lines, fresh_lines);
+    }
+
+    #[test]
+    fn incremental_body_projection_only_reflows_second_column_suffix() {
+        let page = GeoRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 760.0,
+        };
+        let (engine, body, _pull_quotes, _drop_cap, layout, static_projection, orbs) =
+            editorial_test_inputs(page);
+
+        let (first_lines, first_cache, _) = compute_incremental_body_projection(
+            &engine,
+            &body,
+            &layout,
+            &orbs,
+            &static_projection,
+            None,
+        );
+        let first_column_band_buffers = first_cache.columns[0]
+            .bands
+            .iter()
+            .map(|band| {
+                if band.lines.is_empty() {
+                    None
+                } else {
+                    Some((band.lines.as_ptr(), band.lines.len()))
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut moved_orbs = orbs.clone();
+        moved_orbs[2].y += BODY_LINE_HEIGHT;
+
+        let (second_lines, second_cache, stats) = compute_incremental_body_projection(
+            &engine,
+            &body,
+            &layout,
+            &moved_orbs,
+            &static_projection,
+            Some(first_cache),
+        );
+
+        let first_column_right = layout.body_columns[0].right();
+        let first_column_before = first_lines
+            .iter()
+            .filter(|line| line.x < first_column_right)
+            .cloned()
+            .collect::<Vec<_>>();
+        let first_column_after = second_lines
+            .iter()
+            .filter(|line| line.x < first_column_right)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(stats.dirty_bands > 0);
+        assert_eq!(stats.full_recomputes, 0);
+        assert_eq!(first_column_before, first_column_after);
+        for (baseline, band) in first_column_band_buffers
+            .iter()
+            .zip(&second_cache.columns[0].bands)
+        {
+            if let Some((ptr, len)) = baseline {
+                assert_eq!(band.lines.len(), *len);
+                assert_eq!(band.lines.as_ptr(), *ptr);
+            }
+        }
+        assert_ne!(first_lines, second_lines);
+    }
+
+    #[test]
+    fn ensure_projection_hits_bucket_cache_when_orbs_stay_in_same_bucket() {
+        let page = GeoRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 760.0,
+        };
+        let engine = PretextEngine::with_font_data_and_system_fonts(
+            AssetRegistry::bundled_font_data(),
+            false,
+        );
+        let mut demo = EditorialEngineDemo::default();
+
+        demo.ensure_orbs(page);
+        let drop_cap_total_width = demo.ensure_drop_cap_total_width(&engine);
+        let layout = demo.ensure_layout(&engine, page, drop_cap_total_width);
+        {
+            let _ = demo.ensure_projection(&engine, &layout);
+        }
+        assert_eq!(demo.body_cache_stats.bucket_hits, 0);
+
+        demo.orbs[0].x += 0.1;
+        demo.orbs[0].y += 0.1;
+        {
+            let _ = demo.ensure_projection(&engine, &layout);
+        }
+
+        assert_eq!(demo.body_cache_stats.bucket_hits, 1);
+        assert_eq!(demo.body_cache_stats.dirty_bands, 0);
+        assert_eq!(demo.body_cache_stats.full_recomputes, 0);
+    }
+
+    #[test]
     fn editorial_layout_keeps_visual_runs_for_mixed_direction_text() {
         let engine = PretextEngine::with_font_data_and_system_fonts(
             AssetRegistry::bundled_font_data(),
@@ -2093,6 +3146,44 @@ mod tests {
         assert_eq!(wide_projection.pull_quotes.len(), 2);
         assert!(narrow_layout.is_narrow);
         assert!(narrow_projection.pull_quotes.is_empty());
+    }
+
+    #[test]
+    fn static_projection_precomputes_body_rect_obstacles_per_column() {
+        let page = GeoRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1200.0,
+            height: 760.0,
+        };
+        let (_engine, _body, _pull_quotes, _drop_cap, layout, static_projection, _orbs) =
+            editorial_test_inputs(page);
+
+        assert_eq!(
+            static_projection.body_rect_obstacles.len(),
+            layout.body_columns.len()
+        );
+        for (column_index, rect_obstacles) in
+            static_projection.body_rect_obstacles.iter().enumerate()
+        {
+            let mut expected = Vec::new();
+            if column_index == 0 {
+                expected.push(layout.drop_cap_rect);
+            }
+            expected.extend(
+                static_projection
+                    .pull_quotes
+                    .iter()
+                    .filter(|pull_quote| pull_quote.col_idx == column_index)
+                    .map(|pull_quote| pull_quote.rect),
+            );
+
+            let actual = rect_obstacles
+                .iter()
+                .map(|obstacle| obstacle.rect)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
     }
 
     fn extract_js_source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

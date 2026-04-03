@@ -9,74 +9,74 @@
     {
       "x": 80.0,
       "y": 164.0,
-      "width": 81.99,
-      "text": "treat text"
+      "width": 100.71,
+      "text": "treat text as"
     },
     {
       "x": 80.0,
       "y": 192.0,
-      "width": 23.4,
-      "text": "as"
+      "width": 95.634,
+      "text": "something"
     },
     {
       "x": 26.0,
       "y": 220.0,
-      "width": 131.508,
-      "text": "something you"
+      "width": 149.544,
+      "text": "you ask the DOM"
     },
     {
       "x": 26.0,
       "y": 248.0,
-      "width": 168.03,
-      "text": "ask the DOM about"
+      "width": 189.774,
+      "text": "about after the fact. If"
     },
     {
       "x": 26.0,
       "y": 276.0,
-      "width": 263.106,
-      "text": "after the fact. If a layout needs"
+      "width": 287.946,
+      "text": "a layout needs the real height of a"
     },
     {
       "x": 26.0,
       "y": 304.0,
-      "width": 279.036,
-      "text": "the real height of a paragraph, it"
+      "width": 233.676,
+      "text": "paragraph, it has to trigger"
     },
     {
       "x": 26.0,
       "y": 332.0,
-      "width": 284.706,
-      "text": "has to trigger measurement, and"
+      "width": 288.468,
+      "text": "measurement, and measurement"
     },
     {
       "x": 26.0,
       "y": 360.0,
-      "width": 277.668,
-      "text": "measurement is usually coupled"
+      "width": 280.332,
+      "text": "is usually coupled to reflow. That"
     },
     {
       "x": 26.0,
       "y": 388.0,
-      "width": 279.648,
-      "text": "to reflow. That is fine for a single"
+      "width": 210.438,
+      "text": "is fine for a single article"
     },
     {
       "x": 26.0,
       "y": 416.0,
-      "width": 279.162,
-      "text": "article paragraph and disastrous"
+      "width": 251.568,
+      "text": "paragraph and disastrous for"
     },
     {
       "x": 26.0,
       "y": 444.0,
-      "width": 281.826,
-      "text": "for interactive systems that need"
+      "width": 274.698,
+      "text": "interactive systems that need to"
     },
     {
       "x": 26.0,
       "y": 472.0,
-      "width": 266.76,
-      "text": "to measure hundreds of blocks"
+      "width": 244.692,
+      "text": "measure hundreds of blocks"
     },
     {
       "x": 26.0,
@@ -327,8 +327,8 @@
     {
       "x": 662.0,
       "y": 640.0,
-      "width": 236.232,
-      "text": "detail is that animation and"
+      "width": 288.972,
+      "text": "detail is that animation and reflow"
     }
   ],
   "pull_quote_lines": [

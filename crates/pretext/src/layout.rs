@@ -3,13 +3,15 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 
+use ahash::AHashMap;
 use unicode_bidi::{BidiInfo, Level};
 
 use crate::analysis::{analyze_text, slice_text, GraphemeKind, WhiteSpaceMode};
 use crate::bidi::paragraph_to_bidi_runs;
 use crate::engine::{
     GraphemeMeta, LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineGlyphRun, LayoutLineRange,
-    LayoutLineVisualRun, LayoutResult, LayoutWithLinesResult, PrepareOptions, PreparedText,
+    LayoutLineRuns, LayoutLineVisualRun, LayoutLineWithGlyphRuns, LayoutLineWithRuns, LayoutResult,
+    LayoutWithLinesResult, LayoutWithRunsResult, PrepareOptions, PreparedText,
     PreparedTextWithSegments, Segment, SegmentKind, SegmentMeta, TextStyleSpec,
 };
 use crate::font_catalog::FontCatalog;
@@ -266,12 +268,70 @@ pub(crate) fn layout_with_lines(
     }
 }
 
+pub(crate) fn layout_with_runs(
+    prepared: &PreparedTextWithSegments,
+    max_width: f32,
+    line_height: f32,
+    cache: Option<&ParagraphCache>,
+) -> LayoutWithRunsResult {
+    let paragraph = paragraph_layout(prepared.inner(), max_width, cache);
+    let lines = paragraph
+        .lines
+        .iter()
+        .map(|line| materialize_line_with_runs(prepared.inner(), line.range, line.add_hyphen))
+        .collect::<Vec<_>>();
+
+    LayoutWithRunsResult {
+        height: lines.len() as f32 * line_height.max(0.0),
+        line_count: lines.len(),
+        lines,
+    }
+}
+
 pub(crate) fn layout_next_line(
     prepared: &PreparedTextWithSegments,
     start: &mut LayoutCursor,
     max_width: f32,
     cache: Option<&ParagraphCache>,
 ) -> Option<LayoutLine> {
+    let (range, add_hyphen) = next_line_range(prepared, start, max_width, cache)?;
+    Some(materialize_line(prepared.inner(), range, add_hyphen))
+}
+
+pub(crate) fn layout_next_line_with_glyph_runs(
+    prepared: &PreparedTextWithSegments,
+    start: &mut LayoutCursor,
+    max_width: f32,
+    cache: Option<&ParagraphCache>,
+) -> Option<LayoutLineWithGlyphRuns> {
+    let (range, add_hyphen) = next_line_range(prepared, start, max_width, cache)?;
+    Some(materialize_line_with_glyph_runs(
+        prepared.inner(),
+        range,
+        add_hyphen,
+    ))
+}
+
+pub(crate) fn layout_next_line_with_runs(
+    prepared: &PreparedTextWithSegments,
+    start: &mut LayoutCursor,
+    max_width: f32,
+    cache: Option<&ParagraphCache>,
+) -> Option<LayoutLineWithRuns> {
+    let (range, add_hyphen) = next_line_range(prepared, start, max_width, cache)?;
+    Some(materialize_line_with_runs(
+        prepared.inner(),
+        range,
+        add_hyphen,
+    ))
+}
+
+fn next_line_range(
+    prepared: &PreparedTextWithSegments,
+    start: &mut LayoutCursor,
+    max_width: f32,
+    cache: Option<&ParagraphCache>,
+) -> Option<(LayoutLineRange, bool)> {
     if let Some(cache) = cache {
         let paragraph = paragraph_layout(prepared.inner(), max_width, Some(cache));
         if let Some(normalized) = normalize_line_start(prepared.inner(), *start) {
@@ -281,33 +341,152 @@ pub(crate) fn layout_next_line(
                 .find(|line| line.range.start == normalized)
             {
                 *start = line.range.end;
-                return Some(materialize_line(
-                    prepared.inner(),
-                    line.range,
-                    line.add_hyphen,
-                ));
+                return Some((line.range, line.add_hyphen));
             }
         }
     }
 
-    let (range, add_hyphen) = next_line_range_internal(prepared.inner(), start, max_width)?;
-    Some(materialize_line(prepared.inner(), range, add_hyphen))
+    next_line_range_internal(prepared.inner(), start, max_width)
 }
 
 pub(crate) fn line_visual_runs(
     prepared: &PreparedText,
     line: &LayoutLine,
 ) -> Vec<LayoutLineVisualRun> {
-    #[derive(Clone)]
-    struct VisualFragment {
-        text: String,
-        width: f32,
-        start: LayoutCursor,
-        end: LayoutCursor,
-        level: Level,
-        direction: crate::bidi::BidiDirection,
+    line_runs_internal(prepared, line).materialize_visual_runs()
+}
+
+pub(crate) fn line_glyph_runs(
+    prepared: &PreparedText,
+    line: &LayoutLine,
+) -> Vec<LayoutLineGlyphRun> {
+    line_runs_internal(prepared, line).materialize_glyph_runs(prepared)
+}
+
+pub(crate) fn line_runs(prepared: &PreparedText, line: &LayoutLine) -> LayoutLineRuns {
+    let internal = line_runs_internal(prepared, line);
+    LayoutLineRuns {
+        visual_runs: internal.materialize_visual_runs(),
+        glyph_runs: internal.materialize_glyph_runs(prepared),
+    }
+}
+
+fn materialize_line_with_runs(
+    prepared: &PreparedText,
+    range: LayoutLineRange,
+    add_hyphen: bool,
+) -> LayoutLineWithRuns {
+    let (line, internal) = materialize_line_and_internal_runs(prepared, range, add_hyphen);
+    let runs = LayoutLineRuns {
+        visual_runs: internal.materialize_visual_runs(),
+        glyph_runs: internal.materialize_glyph_runs(prepared),
+    };
+    LayoutLineWithRuns { line, runs }
+}
+
+fn materialize_line_with_glyph_runs(
+    prepared: &PreparedText,
+    range: LayoutLineRange,
+    add_hyphen: bool,
+) -> LayoutLineWithGlyphRuns {
+    let (line, internal) = materialize_line_and_internal_runs(prepared, range, add_hyphen);
+    let glyph_runs = internal.materialize_glyph_runs(prepared);
+    LayoutLineWithGlyphRuns { line, glyph_runs }
+}
+
+fn materialize_line_and_internal_runs(
+    prepared: &PreparedText,
+    range: LayoutLineRange,
+    add_hyphen: bool,
+) -> (LayoutLine, LineRunsInternal) {
+    let line = materialize_line(prepared, range, add_hyphen);
+    let internal = line_runs_internal(prepared, &line);
+    (line, internal)
+}
+
+#[derive(Clone)]
+struct InternalFragment {
+    text: String,
+    width: f32,
+    start: LayoutCursor,
+    end: LayoutCursor,
+    start_byte: usize,
+    end_byte: usize,
+    level: Level,
+    direction: crate::bidi::BidiDirection,
+}
+
+#[derive(Clone)]
+struct InternalLogicalRun {
+    text: String,
+    width: f32,
+    start: LayoutCursor,
+    end: LayoutCursor,
+    start_byte: usize,
+    end_byte: usize,
+    level: Level,
+    direction: crate::bidi::BidiDirection,
+    append_synthetic_hyphen: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ClusterGlyphSlice {
+    cluster_byte: usize,
+    glyph_start: usize,
+    glyph_end: usize,
+}
+
+struct LineRunsInternal {
+    logical_runs: Vec<InternalLogicalRun>,
+    visual_order: Vec<usize>,
+}
+
+impl LineRunsInternal {
+    fn materialize_visual_runs(&self) -> Vec<LayoutLineVisualRun> {
+        self.visual_order
+            .iter()
+            .map(|&index| self.logical_runs[index].as_visual_run())
+            .collect()
     }
 
+    fn materialize_glyph_runs(&self, prepared: &PreparedText) -> Vec<LayoutLineGlyphRun> {
+        let mut cluster_slices = AHashMap::<usize, Arc<[ClusterGlyphSlice]>>::new();
+        let mut run_left = 0.0f32;
+        let mut output = Vec::with_capacity(self.visual_order.len());
+
+        for &index in &self.visual_order {
+            let run = &self.logical_runs[index];
+            let mut glyphs = collect_internal_run_glyphs(prepared, run, &mut cluster_slices);
+            shift_glyphs_x(&mut glyphs, run_left);
+            output.push(LayoutLineGlyphRun {
+                width: run.width,
+                start: run.start,
+                end: run.end,
+                level: run.level.number(),
+                direction: run.direction,
+                glyphs,
+            });
+            run_left += run.width;
+        }
+
+        output
+    }
+}
+
+impl InternalLogicalRun {
+    fn as_visual_run(&self) -> LayoutLineVisualRun {
+        LayoutLineVisualRun {
+            text: self.text.clone(),
+            width: self.width,
+            start: self.start,
+            end: self.end,
+            level: self.level.number(),
+            direction: self.direction,
+        }
+    }
+}
+
+fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInternal {
     let mut fragments = Vec::new();
     let mut cursor = line.start;
     let mut line_width = 0.0f32;
@@ -330,11 +509,13 @@ pub(crate) fn line_visual_runs(
 
         let advance = grapheme_advance(segment, grapheme, line_width);
         let (level, direction) = bidi_props_for_grapheme(prepared, grapheme);
-        fragments.push(VisualFragment {
+        fragments.push(InternalFragment {
             text: slice_text(prepared.text(), &grapheme.byte_range).to_owned(),
             width: advance,
             start: cursor,
             end: next,
+            start_byte: grapheme.byte_range.start,
+            end_byte: grapheme.byte_range.end,
             level,
             direction,
         });
@@ -348,24 +529,28 @@ pub(crate) fn line_visual_runs(
         }
     }
 
-    let mut logical_runs = Vec::<LayoutLineVisualRun>::new();
+    let mut logical_runs = Vec::<InternalLogicalRun>::new();
     for fragment in fragments {
         if let Some(last) = logical_runs.last_mut() {
-            if last.level == fragment.level.number() && last.direction == fragment.direction {
+            if last.level == fragment.level && last.direction == fragment.direction {
                 last.text.push_str(&fragment.text);
                 last.width += fragment.width;
                 last.end = fragment.end;
+                last.end_byte = fragment.end_byte;
                 continue;
             }
         }
 
-        logical_runs.push(LayoutLineVisualRun {
+        logical_runs.push(InternalLogicalRun {
             text: fragment.text,
             width: fragment.width,
             start: fragment.start,
             end: fragment.end,
-            level: fragment.level.number(),
+            start_byte: fragment.start_byte,
+            end_byte: fragment.end_byte,
+            level: fragment.level,
             direction: fragment.direction,
+            append_synthetic_hyphen: false,
         });
     }
 
@@ -379,46 +564,18 @@ pub(crate) fn line_visual_runs(
             if let Some(last) = logical_runs.last_mut() {
                 last.text.push('-');
                 last.width += (line.width - logical_width).max(0.0);
+                last.append_synthetic_hyphen = true;
             }
         }
     }
 
-    let levels = logical_runs
-        .iter()
-        .map(|run| {
-            Level::new_explicit(run.level).expect("line visual run levels should stay in range")
-        })
-        .collect::<Vec<_>>();
-    let order = BidiInfo::reorder_visual(&levels);
-    order
-        .into_iter()
-        .map(|index| logical_runs[index].clone())
-        .collect()
-}
+    let levels = logical_runs.iter().map(|run| run.level).collect::<Vec<_>>();
+    let visual_order = BidiInfo::reorder_visual(&levels);
 
-pub(crate) fn line_glyph_runs(
-    prepared: &PreparedText,
-    line: &LayoutLine,
-) -> Vec<LayoutLineGlyphRun> {
-    let visual_runs = line_visual_runs(prepared, line);
-    let mut run_left = 0.0f32;
-    let mut output = Vec::with_capacity(visual_runs.len());
-
-    for run in visual_runs {
-        let mut glyphs = collect_run_glyphs(prepared, &run, line.text.ends_with('-'));
-        shift_glyphs_x(&mut glyphs, run_left);
-        output.push(LayoutLineGlyphRun {
-            width: run.width,
-            start: run.start,
-            end: run.end,
-            level: run.level,
-            direction: run.direction,
-            glyphs,
-        });
-        run_left += run.width;
+    LineRunsInternal {
+        logical_runs,
+        visual_order,
     }
-
-    output
 }
 
 fn next_line_range_internal(
@@ -458,6 +615,18 @@ fn next_line_range_internal(
         let next_cursor = advance_cursor(prepared, cursor);
 
         if next_width > max_width + LINE_FIT_EPSILON && cursor != line_start {
+            if prepared.white_space() == WhiteSpaceMode::Normal
+                && grapheme.kind == GraphemeKind::Space
+            {
+                let range = LayoutLineRange {
+                    width: line_width,
+                    start: line_start,
+                    end: next_cursor,
+                };
+                *start = next_cursor;
+                return Some((range, false));
+            }
+
             if let Some((break_cursor, break_width, add_hyphen)) = last_break {
                 let range = LayoutLineRange {
                     width: break_width,
@@ -545,13 +714,11 @@ fn hyphen_glyphs(
     )
 }
 
-fn collect_run_glyphs(
+fn collect_internal_run_glyphs(
     prepared: &PreparedText,
-    run: &LayoutLineVisualRun,
-    line_has_hyphen: bool,
+    run: &InternalLogicalRun,
+    cluster_slices: &mut AHashMap<usize, Arc<[ClusterGlyphSlice]>>,
 ) -> Vec<LayoutGlyph> {
-    let start_byte = cursor_byte_pos(prepared, run.start);
-    let end_byte = cursor_byte_pos(prepared, run.end);
     let mut glyphs = Vec::new();
     let mut pen_x = 0.0f32;
     let segment_range = if run.direction == crate::bidi::BidiDirection::Rtl {
@@ -564,32 +731,36 @@ fn collect_run_glyphs(
         let Some(segment) = prepared.core.segments.get(segment_index) else {
             continue;
         };
-        let slice_start = start_byte.max(segment.byte_range.start);
-        let slice_end = end_byte.min(segment.byte_range.end);
+        let slice_start = run.start_byte.max(segment.byte_range.start);
+        let slice_end = run.end_byte.min(segment.byte_range.end);
         if slice_start >= slice_end {
             continue;
         }
 
         let local_start = slice_start - segment.byte_range.start;
         let local_end = slice_end - segment.byte_range.start;
-        for glyph in segment.glyphs.iter() {
-            if glyph.cluster_byte < local_start || glyph.cluster_byte >= local_end {
+        let segment_clusters = cluster_slices
+            .entry(segment_index)
+            .or_insert_with(|| segment_cluster_slices(segment));
+        for cluster_slice in segment_clusters.iter() {
+            if cluster_slice.cluster_byte < local_start || cluster_slice.cluster_byte >= local_end {
                 continue;
             }
-            glyphs.push(LayoutGlyph {
-                face_id: glyph.face_id,
-                glyph_id: glyph.glyph_id,
-                x: pen_x,
-                advance: glyph.advance,
-                x_offset: glyph.x_offset,
-                y_offset: glyph.y_offset,
-            });
-            pen_x += glyph.advance;
+            for glyph in &segment.glyphs[cluster_slice.glyph_start..cluster_slice.glyph_end] {
+                glyphs.push(LayoutGlyph {
+                    face_id: glyph.face_id,
+                    glyph_id: glyph.glyph_id,
+                    x: pen_x,
+                    advance: glyph.advance,
+                    x_offset: glyph.x_offset,
+                    y_offset: glyph.y_offset,
+                });
+                pen_x += glyph.advance;
+            }
         }
     }
 
-    let extracted = extract_text(prepared, run.start, run.end, prepared.white_space());
-    if line_has_hyphen && run.text.ends_with('-') && !extracted.ends_with('-') {
+    if run.append_synthetic_hyphen {
         for glyph in prepared.hyphen_glyphs() {
             glyphs.push(LayoutGlyph {
                 face_id: glyph.face_id,
@@ -606,6 +777,27 @@ fn collect_run_glyphs(
     glyphs
 }
 
+fn segment_cluster_slices(segment: &Segment) -> Arc<[ClusterGlyphSlice]> {
+    let mut output = Vec::new();
+    let mut glyph_start = 0usize;
+    while glyph_start < segment.glyphs.len() {
+        let cluster_byte = segment.glyphs[glyph_start].cluster_byte;
+        let mut glyph_end = glyph_start + 1;
+        while glyph_end < segment.glyphs.len()
+            && segment.glyphs[glyph_end].cluster_byte == cluster_byte
+        {
+            glyph_end += 1;
+        }
+        output.push(ClusterGlyphSlice {
+            cluster_byte,
+            glyph_start,
+            glyph_end,
+        });
+        glyph_start = glyph_end;
+    }
+    Arc::from(output)
+}
+
 fn shift_glyphs_x(glyphs: &mut [LayoutGlyph], delta: f32) {
     if delta == 0.0 {
         return;
@@ -613,16 +805,6 @@ fn shift_glyphs_x(glyphs: &mut [LayoutGlyph], delta: f32) {
     for glyph in glyphs {
         glyph.x += delta;
     }
-}
-
-fn cursor_byte_pos(prepared: &PreparedText, cursor: LayoutCursor) -> usize {
-    if let Some(segment) = prepared.seg_meta().get(cursor.segment_index) {
-        if let Some(grapheme) = segment.graphemes.get(cursor.grapheme_index) {
-            return grapheme.byte_range.start;
-        }
-        return segment.byte_range.end;
-    }
-    prepared.text().len()
 }
 
 enum EitherSegmentIter {

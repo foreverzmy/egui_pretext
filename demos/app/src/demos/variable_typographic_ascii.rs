@@ -5,9 +5,12 @@ use egui::{
     Color32, ColorImage, CornerRadius, Label, Rect, RichText, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions,
 };
-use pretext::{BidiDirection, PretextEngine, TextStyleSpec};
-use pretext_egui::{AssetRegistry, BaselineMode, ShapedTextRasterRequest};
-use pretext_render::{TextRasterRequest, TextRenderCache};
+use pretext::{BidiDirection, LayoutCursor, LayoutLineGlyphRun, PretextEngine, TextStyleSpec};
+use pretext_egui::{
+    paint_styled_positioned_text_runs, AssetRegistry, PretextFragmentPaintOptions,
+    StyledPositionedTextRunRef,
+};
+use pretext_render::{BaselineMode, TextRasterRequest, TextRenderCache};
 
 use crate::demos::DemoWindow;
 
@@ -58,8 +61,6 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const FRAME_DT_SECONDS: f32 = 1.0 / 60.0;
 const FRAME_DT_MILLIS: f32 = 1000.0 / 60.0;
 
-const SHAPED_TEXT_PAD_X: f32 = 2.0;
-const SHAPED_TEXT_PAD_Y: f32 = 2.0;
 const BRIGHTNESS_CANVAS_SIZE: f32 = 28.0;
 const BRIGHTNESS_CANVAS_PIXELS: usize = BRIGHTNESS_CANVAS_SIZE as usize;
 const PROP_COLOR_RGB: [u8; 3] = [196, 163, 90];
@@ -79,6 +80,7 @@ pub struct VariableTypographicAsciiDemo {
     stamps: Stamps,
     palette: Option<PaletteCache>,
     palette_engine_revision: Option<u64>,
+    rows: Vec<RowRender>,
     source_texture: Option<SizedTexture>,
 }
 
@@ -104,17 +106,19 @@ struct VariantStyle {
     style: TextStyleSpec,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PaletteEntry {
-    ch: char,
+    text: String,
     variant_index: usize,
     width: f32,
     brightness: f32,
+    glyph_runs: Vec<LayoutLineGlyphRun>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct BrightnessEntry {
     mono_char: char,
+    mono_palette_index: u8,
     prop: PropLookup,
 }
 
@@ -129,27 +133,71 @@ enum PropLookup {
 }
 
 #[derive(Clone, Debug)]
-struct PaletteCache {
-    variants: Vec<VariantStyle>,
-    entries: Vec<PaletteEntry>,
-    lookup: [BrightnessEntry; 256],
-    prop_space_width: f32,
-    mono_style: TextStyleSpec,
-    mono_row_width: f32,
+struct MonoPaletteEntry {
+    ch: char,
+    text: String,
+    glyph_runs: Vec<LayoutLineGlyphRun>,
 }
 
 #[derive(Clone, Debug)]
-struct RowRender {
-    mono_text: String,
-    prop_glyphs: Vec<RowGlyph>,
-    prop_width: f32,
+struct PaletteCache {
+    variants: Vec<VariantStyle>,
+    entries: Vec<PaletteEntry>,
+    mono_entries: Vec<MonoPaletteEntry>,
+    lookup: [BrightnessEntry; 256],
+    prop_space_width: f32,
+    mono_style: TextStyleSpec,
+    mono_cell_width: f32,
+    mono_row_width: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MonoGlyph {
+    column: u8,
+    x_offset: f32,
+    palette_index: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct RowGlyph {
+    column: u8,
     x_offset: f32,
     palette_index: usize,
     alpha_step: u8,
+}
+
+#[derive(Clone, Debug)]
+struct RowRender {
+    initialized: bool,
+    brightness_bytes: [u8; COLS],
+    cells: [BrightnessEntry; COLS],
+    mono_bytes: [u8; COLS],
+    mono_glyphs: Vec<MonoGlyph>,
+    prop_glyphs: Vec<RowGlyph>,
+    prop_prefix_widths: [f32; COLS + 1],
+    prop_width: f32,
+}
+
+impl Default for RowRender {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            brightness_bytes: [0; COLS],
+            cells: [BrightnessEntry::default(); COLS],
+            mono_bytes: [b' '; COLS],
+            mono_glyphs: Vec::with_capacity(COLS),
+            prop_glyphs: Vec::with_capacity(COLS),
+            prop_prefix_widths: [0.0; COLS + 1],
+            prop_width: 0.0,
+        }
+    }
+}
+
+impl RowRender {
+    #[cfg(test)]
+    fn mono_text(&self) -> &str {
+        std::str::from_utf8(&self.mono_bytes).expect("row mono bytes should stay ASCII")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +252,7 @@ impl Default for VariableTypographicAsciiDemo {
             stamps,
             palette: None,
             palette_engine_revision: None,
+            rows: Vec::new(),
             source_texture: None,
         };
         demo.step_simulation();
@@ -236,21 +285,20 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1540.0, 820.0))
+            .default_size(egui::vec2(3080.0, 1640.0))
             .frame(window_frame)
             .show(ctx, |ui| {
                 paint_window_background(ui.painter(), ui.max_rect());
                 self.refresh_palette_if_needed(engine);
                 self.update(ctx.input(|input| input.time));
 
-                let rows = {
-                    let palette = self
-                        .palette
-                        .as_ref()
-                        .expect("palette should exist before row generation");
-                    build_rows(&self.brightness_field, palette)
-                };
+                let palette = self
+                    .palette
+                    .as_ref()
+                    .expect("palette should exist before row generation");
+                rebuild_rows(&mut self.rows, &self.brightness_field, palette);
                 let source_texture = self.ensure_source_texture(ctx);
+                let rows = &self.rows;
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.vertical_centered(|ui| {
@@ -524,6 +572,7 @@ fn build_palette(engine: &PretextEngine) -> PaletteCache {
     let mut raster_cache = TextRenderCache::default();
     let prop_space_width = measure_text_width(engine, " ", &prop_base_style()).max(1.0);
     let variants = build_variants();
+    let mono_style = mono_style();
     let mut entries = Vec::new();
 
     for (variant_index, variant) in variants.iter().enumerate() {
@@ -539,11 +588,15 @@ fn build_palette(engine: &PretextEngine) -> PaletteCache {
 
             let brightness =
                 estimate_brightness(engine, &mut raster_cache, ch, &variant.style, width);
+            let mut buffer = [0u8; 4];
+            let glyph_runs =
+                single_line_glyph_runs(engine, ch.encode_utf8(&mut buffer), &variant.style);
             entries.push(PaletteEntry {
-                ch,
+                text: ch.to_string(),
                 variant_index,
                 width,
                 brightness,
+                glyph_runs,
             });
         }
     }
@@ -559,10 +612,27 @@ fn build_palette(engine: &PretextEngine) -> PaletteCache {
     }
     entries.sort_by(|left, right| left.brightness.total_cmp(&right.brightness));
 
-    let mono_style = mono_style();
     let mono_cell_width = measure_char_width(engine, '0', &mono_style).max(1.0);
+    let mono_entries = MONO_RAMP
+        .chars()
+        .map(|ch| {
+            let mut buffer = [0u8; 4];
+            MonoPaletteEntry {
+                ch,
+                text: ch.to_string(),
+                glyph_runs: single_line_glyph_runs(
+                    engine,
+                    ch.encode_utf8(&mut buffer),
+                    &mono_style,
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
     let mut lookup = [BrightnessEntry::default(); 256];
-    let mono_chars: Vec<char> = MONO_RAMP.chars().collect();
+    let mono_chars = mono_entries
+        .iter()
+        .map(|entry| entry.ch)
+        .collect::<Vec<_>>();
 
     for brightness_byte in 0..=255u16 {
         let brightness = brightness_byte as f32 / 255.0;
@@ -573,6 +643,7 @@ fn build_palette(engine: &PretextEngine) -> PaletteCache {
         lookup[brightness_byte as usize] = if brightness < 0.03 {
             BrightnessEntry {
                 mono_char,
+                mono_palette_index: mono_index as u8,
                 prop: PropLookup::Blank,
             }
         } else {
@@ -580,6 +651,7 @@ fn build_palette(engine: &PretextEngine) -> PaletteCache {
             let alpha_step = (brightness * 10.0).round().clamp(1.0, 10.0) as u8;
             BrightnessEntry {
                 mono_char,
+                mono_palette_index: mono_index as u8,
                 prop: PropLookup::Glyph {
                     palette_index,
                     alpha_step,
@@ -591,9 +663,11 @@ fn build_palette(engine: &PretextEngine) -> PaletteCache {
     PaletteCache {
         variants,
         entries,
+        mono_entries,
         lookup,
         prop_space_width,
         mono_style,
+        mono_cell_width,
         mono_row_width: mono_cell_width * COLS as f32,
     }
 }
@@ -612,53 +686,115 @@ fn build_variants() -> Vec<VariantStyle> {
     variants
 }
 
-fn build_rows(field: &[f32], palette: &PaletteCache) -> Vec<RowRender> {
-    let mut rows = Vec::with_capacity(ROWS);
-    for row in 0..ROWS {
-        let mut mono_text = String::with_capacity(COLS);
-        let mut prop_glyphs = Vec::new();
-        let mut prop_width = 0.0;
+fn rebuild_rows(rows: &mut Vec<RowRender>, field: &[f32], palette: &PaletteCache) {
+    if rows.len() < ROWS {
+        rows.resize_with(ROWS, RowRender::default);
+    } else {
+        rows.truncate(ROWS);
+    }
+
+    for (row, row_render) in rows.iter_mut().enumerate() {
         let field_row_start = row * FIELD_OVERSAMPLE * FIELD_COLS;
+        let mut first_changed_col = if row_render.initialized {
+            None
+        } else {
+            Some(0)
+        };
 
         for col in 0..COLS {
-            let field_col_start = col * FIELD_OVERSAMPLE;
-            let mut brightness = 0.0;
-            for sample_y in 0..FIELD_OVERSAMPLE {
-                let sample_row_offset = field_row_start + sample_y * FIELD_COLS + field_col_start;
-                for sample_x in 0..FIELD_OVERSAMPLE {
-                    brightness += field[sample_row_offset + sample_x];
-                }
-            }
-
-            let average = brightness / (FIELD_OVERSAMPLE * FIELD_OVERSAMPLE) as f32;
-            let brightness_byte = (average * 255.0).floor().clamp(0.0, 255.0) as usize;
-            let lookup = palette.lookup[brightness_byte];
-            mono_text.push(lookup.mono_char);
-
-            match lookup.prop {
-                PropLookup::Blank => {
-                    prop_width += palette.prop_space_width;
-                }
-                PropLookup::Glyph {
-                    palette_index,
-                    alpha_step,
-                } => {
-                    prop_glyphs.push(RowGlyph {
-                        x_offset: prop_width,
-                        palette_index,
-                        alpha_step,
-                    });
-                    prop_width += palette.entries[palette_index].width;
+            let brightness_byte = sample_cell_brightness_byte(field, field_row_start, col);
+            if !row_render.initialized || brightness_byte != row_render.brightness_bytes[col] {
+                row_render.brightness_bytes[col] = brightness_byte;
+                let lookup = palette.lookup[brightness_byte as usize];
+                row_render.cells[col] = lookup;
+                row_render.mono_bytes[col] = lookup.mono_char as u8;
+                if row_render.initialized && first_changed_col.is_none() {
+                    first_changed_col = Some(col);
                 }
             }
         }
 
-        rows.push(RowRender {
-            mono_text,
-            prop_glyphs,
-            prop_width,
-        });
+        if let Some(start_col) = first_changed_col {
+            rebuild_row_suffix(row_render, start_col, palette);
+            row_render.initialized = true;
+        }
     }
+}
+
+fn sample_cell_brightness_byte(field: &[f32], field_row_start: usize, col: usize) -> u8 {
+    let field_col_start = col * FIELD_OVERSAMPLE;
+    let mut brightness = 0.0;
+    for sample_y in 0..FIELD_OVERSAMPLE {
+        let sample_row_offset = field_row_start + sample_y * FIELD_COLS + field_col_start;
+        for sample_x in 0..FIELD_OVERSAMPLE {
+            brightness += field[sample_row_offset + sample_x];
+        }
+    }
+
+    let average = brightness / (FIELD_OVERSAMPLE * FIELD_OVERSAMPLE) as f32;
+    (average * 255.0).floor().clamp(0.0, 255.0) as u8
+}
+
+fn rebuild_row_suffix(row_render: &mut RowRender, start_col: usize, palette: &PaletteCache) {
+    if start_col == 0 {
+        row_render.mono_glyphs.clear();
+        row_render.prop_glyphs.clear();
+        row_render.prop_prefix_widths[0] = 0.0;
+    } else {
+        row_render
+            .mono_glyphs
+            .retain(|glyph| (glyph.column as usize) < start_col);
+        row_render
+            .prop_glyphs
+            .retain(|glyph| (glyph.column as usize) < start_col);
+    }
+
+    let mut mono_x = start_col as f32 * palette.mono_cell_width;
+    let mut prop_width = row_render.prop_prefix_widths[start_col];
+
+    for col in start_col..COLS {
+        let lookup = row_render.cells[col];
+        let mono_palette_index = lookup.mono_palette_index as usize;
+        if !palette.mono_entries[mono_palette_index]
+            .glyph_runs
+            .is_empty()
+        {
+            row_render.mono_glyphs.push(MonoGlyph {
+                column: col as u8,
+                x_offset: mono_x,
+                palette_index: mono_palette_index,
+            });
+        }
+        mono_x += palette.mono_cell_width;
+
+        row_render.prop_prefix_widths[col] = prop_width;
+        match lookup.prop {
+            PropLookup::Blank => {
+                prop_width += palette.prop_space_width;
+            }
+            PropLookup::Glyph {
+                palette_index,
+                alpha_step,
+            } => {
+                row_render.prop_glyphs.push(RowGlyph {
+                    column: col as u8,
+                    x_offset: prop_width,
+                    palette_index,
+                    alpha_step,
+                });
+                prop_width += palette.entries[palette_index].width;
+            }
+        }
+        row_render.prop_prefix_widths[col + 1] = prop_width;
+    }
+
+    row_render.prop_width = prop_width;
+}
+
+#[cfg(test)]
+fn build_rows(field: &[f32], palette: &PaletteCache) -> Vec<RowRender> {
+    let mut rows = Vec::new();
+    rebuild_rows(&mut rows, field, palette);
     rows
 }
 
@@ -714,6 +850,23 @@ fn measure_text_width(engine: &PretextEngine, text: &str, style: &TextStyleSpec)
         .iter()
         .map(|span| span.width)
         .sum()
+}
+
+fn single_line_glyph_runs(
+    engine: &PretextEngine,
+    text: &str,
+    style: &TextStyleSpec,
+) -> Vec<LayoutLineGlyphRun> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let prepared = engine.prepare_with_segments(text, style, &pretext::PrepareOptions::default());
+    let mut cursor = LayoutCursor::default();
+    engine
+        .layout_next_line_with_glyph_runs(&prepared, &mut cursor, 100_000.0)
+        .map(|line| line.glyph_runs)
+        .unwrap_or_default()
 }
 
 fn estimate_brightness(
@@ -773,7 +926,7 @@ fn find_best_entry(entries: &[PaletteEntry], target_brightness: f32, target_widt
     let mut best_score = f32::INFINITY;
 
     for index in start..end {
-        let entry = entries[index];
+        let entry = &entries[index];
         let brightness_error = (entry.brightness - target_brightness).abs() * 2.5;
         let width_error = (entry.width - target_width).abs() / target_width;
         let score = brightness_error + width_error;
@@ -987,28 +1140,34 @@ fn paint_prop_panel(
     paint_panel_box(painter, rect);
     let content_rect = panel_content_rect(rect);
     let clipped = painter.with_clip_rect(rect);
-
-    for (row_index, row) in rows.iter().enumerate() {
-        let row_y = content_rect.top() + row_index as f32 * LINE_HEIGHT;
-        let start_x = content_rect.center().x - row.prop_width * 0.5;
-        for glyph in &row.prop_glyphs {
-            let entry = palette.entries[glyph.palette_index];
-            let variant = &palette.variants[entry.variant_index];
-            let mut buffer = [0u8; 4];
-            let text = entry.ch.encode_utf8(&mut buffer);
-            paint_text_fragment(
-                &clipped,
-                egui::pos2(start_x + glyph.x_offset, row_y),
-                text,
-                &variant.style,
-                LINE_HEIGHT,
-                prop_color(glyph.alpha_step),
-                ctx,
-                engine,
-                assets,
-            );
-        }
-    }
+    let _ = paint_styled_positioned_text_runs(
+        &clipped,
+        rows.iter().enumerate().flat_map(|(row_index, row)| {
+            let row_y = content_rect.top() + row_index as f32 * LINE_HEIGHT;
+            let start_x = content_rect.center().x - row.prop_width * 0.5;
+            row.prop_glyphs.iter().map(move |glyph| {
+                let entry = &palette.entries[glyph.palette_index];
+                let variant = &palette.variants[entry.variant_index];
+                StyledPositionedTextRunRef {
+                    x: start_x + glyph.x_offset,
+                    y: row_y,
+                    text: &entry.text,
+                    glyph_runs: &entry.glyph_runs,
+                    emoji_overlays: &[],
+                    options: PretextFragmentPaintOptions::new(&variant.style, LINE_HEIGHT)
+                        .color(prop_color(glyph.alpha_step))
+                        .fallback_font(egui::FontId::new(
+                            variant.style.size_px,
+                            egui::FontFamily::Proportional,
+                        ))
+                        .fallback_align(egui::Align2::LEFT_TOP),
+                }
+            })
+        }),
+        ctx,
+        engine,
+        assets,
+    );
 }
 
 fn paint_mono_panel(
@@ -1024,21 +1183,33 @@ fn paint_mono_panel(
     let content_rect = panel_content_rect(rect);
     let clipped = painter.with_clip_rect(rect);
     let start_x = content_rect.center().x - palette.mono_row_width * 0.5;
-
-    for (row_index, row) in rows.iter().enumerate() {
-        let row_y = content_rect.top() + row_index as f32 * LINE_HEIGHT;
-        paint_text_fragment(
-            &clipped,
-            egui::pos2(start_x, row_y),
-            &row.mono_text,
-            &palette.mono_style,
-            LINE_HEIGHT,
-            Color32::from_rgba_premultiplied(130, 155, 210, 179),
-            ctx,
-            engine,
-            assets,
-        );
-    }
+    let mono_color = Color32::from_rgba_premultiplied(130, 155, 210, 179);
+    let _ = paint_styled_positioned_text_runs(
+        &clipped,
+        rows.iter().enumerate().flat_map(|(row_index, row)| {
+            let row_y = content_rect.top() + row_index as f32 * LINE_HEIGHT;
+            row.mono_glyphs.iter().map(move |glyph| {
+                let entry = &palette.mono_entries[glyph.palette_index];
+                StyledPositionedTextRunRef {
+                    x: start_x + glyph.x_offset,
+                    y: row_y,
+                    text: &entry.text,
+                    glyph_runs: &entry.glyph_runs,
+                    emoji_overlays: &[],
+                    options: PretextFragmentPaintOptions::new(&palette.mono_style, LINE_HEIGHT)
+                        .color(mono_color)
+                        .fallback_font(egui::FontId::new(
+                            palette.mono_style.size_px,
+                            egui::FontFamily::Monospace,
+                        ))
+                        .fallback_align(egui::Align2::LEFT_TOP),
+                }
+            })
+        }),
+        ctx,
+        engine,
+        assets,
+    );
 }
 
 fn paint_panel_box(painter: &egui::Painter, rect: Rect) {
@@ -1089,53 +1260,6 @@ fn prop_color(alpha_step: u8) -> Color32 {
     )
 }
 
-fn paint_text_fragment(
-    painter: &egui::Painter,
-    pos: egui::Pos2,
-    text: &str,
-    style: &TextStyleSpec,
-    line_height: f32,
-    color: Color32,
-    ctx: &egui::Context,
-    engine: &PretextEngine,
-    assets: &mut AssetRegistry,
-) {
-    if text.is_empty() {
-        return;
-    }
-
-    let request = ShapedTextRasterRequest {
-        text,
-        style,
-        direction: BidiDirection::Ltr,
-        color,
-        fragment_width: 0.0,
-        slot_height: line_height,
-        padding_x: SHAPED_TEXT_PAD_X,
-        padding_y: SHAPED_TEXT_PAD_Y,
-        slack_x: 2.0,
-        slack_y: 2.0,
-        baseline_mode: BaselineMode::AutoFontMetrics,
-        texture_options: TextureOptions::LINEAR,
-    };
-    let Some(texture) = assets.shaped_text_texture(engine, request, ctx) else {
-        return;
-    };
-
-    let pixels_per_point = ctx.pixels_per_point().max(1.0);
-    let rect_min = egui::pos2(
-        ((pos.x - SHAPED_TEXT_PAD_X) * pixels_per_point).round() / pixels_per_point,
-        ((pos.y - SHAPED_TEXT_PAD_Y) * pixels_per_point).round() / pixels_per_point,
-    );
-    let rect = Rect::from_min_size(rect_min, texture.logical_size);
-    painter.image(
-        texture.handle.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        color,
-    );
-}
-
 fn source_color_image(source_pixels: &[f32]) -> ColorImage {
     let pixels = source_pixels
         .iter()
@@ -1150,6 +1274,7 @@ fn source_color_image(source_pixels: &[f32]) -> ColorImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::demos::DemoWindow;
 
     fn normalize_whitespace(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -1193,10 +1318,50 @@ mod tests {
         assert!(matches!(palette.lookup[0].prop, PropLookup::Blank));
         assert!(matches!(palette.lookup[255].prop, PropLookup::Glyph { .. }));
         for row in &rows {
-            assert_eq!(row.mono_text.chars().count(), COLS);
+            assert_eq!(row.mono_text().chars().count(), COLS);
+            assert!(row.mono_glyphs.is_empty());
             assert!(row.prop_glyphs.is_empty());
             assert!((row.prop_width - palette.prop_space_width * COLS as f32).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn rebuild_rows_does_not_reenter_text_layout() {
+        let engine = engine();
+        let palette = build_palette(&engine);
+        let before = engine.runtime_stats();
+        let mut rows = Vec::new();
+
+        rebuild_rows(&mut rows, &vec![0.5; FIELD_COLS * FIELD_ROWS], &palette);
+
+        let after = engine.runtime_stats();
+        assert_eq!(
+            after.prepare_with_segments_calls,
+            before.prepare_with_segments_calls
+        );
+        assert_eq!(
+            after.layout_with_lines_calls,
+            before.layout_with_lines_calls
+        );
+        assert_eq!(after.line_glyph_runs_calls, before.line_glyph_runs_calls);
+    }
+
+    #[test]
+    fn variable_ascii_render_uses_atlas_without_shaped_text_textures() {
+        let ctx = egui::Context::default();
+        let engine = engine();
+        let mut assets = AssetRegistry::default();
+        assets.install_fonts(&ctx);
+        let mut demo = VariableTypographicAsciiDemo::default();
+        demo.set_open(true);
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            demo.show(ctx, &engine, &mut assets);
+        });
+        let stats = assets.stats_snapshot();
+
+        assert!(stats.atlas_entries > 0);
+        assert_eq!(stats.shaped_text_textures, 0);
     }
 
     #[test]
