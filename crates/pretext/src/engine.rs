@@ -28,6 +28,13 @@ pub struct PretextEngine {
 }
 
 #[derive(Clone, Debug)]
+pub struct PretextEngineBuilder {
+    font_data: Vec<Vec<u8>>,
+    include_system_fonts: bool,
+    default_locale: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TextStyleSpec {
     pub families: Vec<String>,
     pub size_px: f32,
@@ -366,8 +373,73 @@ impl PreparedTextWithSegments {
         &self.inner
     }
 
+    #[doc(hidden)]
     pub fn as_prepared(&self) -> &PreparedText {
         &self.inner
+    }
+
+    pub fn measure(
+        &self,
+        engine: &PretextEngine,
+        max_width: f32,
+        line_height: f32,
+    ) -> LayoutResult {
+        engine.measure_paragraph(self, max_width, line_height)
+    }
+
+    pub fn layout(
+        &self,
+        engine: &PretextEngine,
+        max_width: f32,
+        line_height: f32,
+    ) -> LayoutWithRunsResult {
+        engine.layout_paragraph(self, max_width, line_height)
+    }
+}
+
+impl Default for PretextEngineBuilder {
+    fn default() -> Self {
+        Self {
+            font_data: Vec::new(),
+            include_system_fonts: true,
+            default_locale: None,
+        }
+    }
+}
+
+impl PretextEngineBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_font_data<I>(mut self, font_data: I) -> Self
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        self.font_data.extend(font_data);
+        self
+    }
+
+    pub fn include_system_fonts(mut self, include_system_fonts: bool) -> Self {
+        self.include_system_fonts = include_system_fonts;
+        self
+    }
+
+    pub fn default_locale(mut self, locale: impl Into<String>) -> Self {
+        let locale = locale.into();
+        self.default_locale = (!locale.is_empty()).then_some(locale);
+        self
+    }
+
+    pub fn build(self) -> PretextEngine {
+        let mut engine = PretextEngine::with_font_data_and_system_fonts(
+            self.font_data,
+            self.include_system_fonts,
+        );
+        if let Some(locale) = self.default_locale.as_deref() {
+            engine.set_locale(Some(locale));
+        }
+        engine
     }
 }
 
@@ -472,6 +544,10 @@ impl AtomicPlaceholderCacheKey {
 }
 
 impl PretextEngine {
+    pub fn builder() -> PretextEngineBuilder {
+        PretextEngineBuilder::new()
+    }
+
     pub fn new() -> Self {
         Self {
             font_catalog: FontCatalog::new(),
@@ -484,6 +560,7 @@ impl PretextEngine {
         }
     }
 
+    #[doc(hidden)]
     pub fn with_font_data<I>(font_data: I) -> Self
     where
         I: IntoIterator<Item = Vec<u8>>,
@@ -491,6 +568,7 @@ impl PretextEngine {
         Self::with_font_data_and_system_fonts(font_data, true)
     }
 
+    #[doc(hidden)]
     pub fn with_font_data_and_system_fonts<I>(font_data: I, include_system_fonts: bool) -> Self
     where
         I: IntoIterator<Item = Vec<u8>>,
@@ -509,6 +587,7 @@ impl PretextEngine {
         }
     }
 
+    #[doc(hidden)]
     pub fn prepare(
         &self,
         text: &str,
@@ -521,6 +600,7 @@ impl PretextEngine {
         self.prepare_cached(text, style, opts).inner
     }
 
+    #[doc(hidden)]
     pub fn prepare_with_segments(
         &self,
         text: &str,
@@ -531,6 +611,15 @@ impl PretextEngine {
             .prepare_with_segments_calls
             .fetch_add(1, Ordering::Relaxed);
         self.prepare_cached(text, style, opts)
+    }
+
+    pub fn prepare_paragraph(
+        &self,
+        text: &str,
+        style: &TextStyleSpec,
+        opts: &PrepareOptions,
+    ) -> PreparedTextWithSegments {
+        self.prepare_with_segments(text, style, opts)
     }
 
     pub fn prepare_atomic_placeholder(
@@ -544,6 +633,7 @@ impl PretextEngine {
         self.prepare_atomic_placeholder_cached(width, opts)
     }
 
+    #[doc(hidden)]
     pub fn layout(
         &self,
         prepared: &PreparedText,
@@ -556,6 +646,7 @@ impl PretextEngine {
         layout::layout(prepared, max_width, line_height, self.para_cache.as_ref())
     }
 
+    #[doc(hidden)]
     pub fn layout_with_lines(
         &self,
         prepared: &PreparedTextWithSegments,
@@ -568,6 +659,7 @@ impl PretextEngine {
         layout::layout_with_lines(prepared, max_width, line_height, self.para_cache.as_ref())
     }
 
+    #[doc(hidden)]
     pub fn layout_with_runs(
         &self,
         prepared: &PreparedTextWithSegments,
@@ -578,6 +670,24 @@ impl PretextEngine {
             .layout_with_runs_calls
             .fetch_add(1, Ordering::Relaxed);
         layout::layout_with_runs(prepared, max_width, line_height, self.para_cache.as_ref())
+    }
+
+    pub fn measure_paragraph(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        max_width: f32,
+        line_height: f32,
+    ) -> LayoutResult {
+        self.layout(prepared.as_prepared(), max_width, line_height)
+    }
+
+    pub fn layout_paragraph(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        max_width: f32,
+        line_height: f32,
+    ) -> LayoutWithRunsResult {
+        self.layout_with_runs(prepared, max_width, line_height)
     }
 
     pub fn walk_line_ranges(

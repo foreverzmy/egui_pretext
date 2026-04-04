@@ -1,13 +1,16 @@
 mod support;
 
-use pretext::{BidiDirection, PrepareOptions, WhiteSpaceMode};
+use pretext::advanced::{LayoutCursor, LayoutLine};
+use pretext::{
+    BidiDirection, PretextEngine, PretextParagraphOptions, PretextPreparedParagraph, WhiteSpaceMode,
+};
 
 const WIDTH_EPSILON: f32 = 0.05;
 
 fn assert_run_parity(
-    engine: &pretext::PretextEngine,
-    prepared: &pretext::PreparedTextWithSegments,
-    line: &pretext::LayoutLine,
+    engine: &PretextEngine,
+    prepared: &PretextPreparedParagraph,
+    line: &LayoutLine,
 ) {
     let visual_runs = engine.line_visual_runs(prepared, line);
     let glyph_runs = engine.line_glyph_runs(prepared, line);
@@ -32,23 +35,23 @@ fn assert_run_parity(
 #[test]
 fn mixed_bidi_visual_and_glyph_runs_stay_in_lockstep() {
     let engine = support::bundled_engine();
-    let prepared = engine.prepare_with_segments(
+    let prepared = engine.prepare_paragraph(
         "English قبل العربية and then back again",
         &support::default_style(),
-        &PrepareOptions::default(),
+        &PretextParagraphOptions::default(),
     );
-    let layout = engine.layout_with_lines(&prepared, 220.0, 22.0);
+    let layout = engine.layout_paragraph(&prepared, 220.0, 22.0);
 
     assert!(layout.line_count >= 1);
     assert!(layout.lines.iter().any(|line| {
-        engine
-            .line_visual_runs(&prepared, line)
+        line.runs
+            .visual_runs
             .iter()
             .any(|run| run.direction == BidiDirection::Rtl)
     }));
 
     for line in &layout.lines {
-        assert_run_parity(&engine, &prepared, line);
+        assert_run_parity(&engine, &prepared, &line.line);
     }
 }
 
@@ -58,13 +61,13 @@ fn soft_hyphen_visual_and_glyph_runs_share_synthetic_hyphen_width() {
     let style = support::default_style();
     let prefix_widths = engine.prefix_widths("hy", &style);
     let max_width = prefix_widths[2] + engine.glyph_advance('-', &style) + 0.5;
-    let prepared = engine.prepare_with_segments(
+    let prepared = engine.prepare_paragraph(
         "hy\u{00AD}phenation demo",
         &style,
-        &PrepareOptions::default(),
+        &PretextParagraphOptions::default(),
     );
-    let layout = engine.layout_with_lines(&prepared, max_width, 20.0);
-    let first_line = layout.lines.first().expect("expected first line");
+    let layout = engine.layout_paragraph(&prepared, max_width, 20.0);
+    let first_line = &layout.lines.first().expect("expected first line").line;
 
     assert!(first_line.text.ends_with('-'));
     assert_run_parity(&engine, &prepared, first_line);
@@ -78,17 +81,22 @@ fn soft_hyphen_visual_and_glyph_runs_share_synthetic_hyphen_width() {
 #[test]
 fn normal_whitespace_trims_trailing_spaces_before_visual_and_glyph_runs() {
     let engine = support::bundled_engine();
-    let prepared = engine.prepare_with_segments(
+    let prepared = engine.prepare_paragraph(
         "abc   ",
         &support::default_style(),
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            ..PrepareOptions::default()
+            ..PretextParagraphOptions::default()
         },
     );
-    let layout = engine.layout_with_lines(&prepared, 240.0, 20.0);
-    let line = layout.lines.first().expect("expected single line");
-    let visual_runs = engine.line_visual_runs(&prepared, line);
+    let layout = engine.layout_paragraph(&prepared, 240.0, 20.0);
+    let line = &layout.lines.first().expect("expected single line").line;
+    let visual_runs = &layout
+        .lines
+        .first()
+        .expect("expected single line")
+        .runs
+        .visual_runs;
 
     assert_eq!(line.text, "abc");
     assert_eq!(
@@ -103,37 +111,35 @@ fn normal_whitespace_trims_trailing_spaces_before_visual_and_glyph_runs() {
 }
 
 #[test]
-fn layout_with_runs_matches_layout_with_lines_and_line_runs() {
+fn layout_paragraph_matches_measurement_and_line_runs() {
     let engine = support::bundled_engine();
-    let prepared = engine.prepare_with_segments(
+    let prepared = engine.prepare_paragraph(
         "English قبل العربية and then back again",
         &support::default_style(),
-        &PrepareOptions::default(),
+        &PretextParagraphOptions::default(),
     );
-    let with_lines = engine.layout_with_lines(&prepared, 220.0, 22.0);
-    let with_runs = engine.layout_with_runs(&prepared, 220.0, 22.0);
+    let metrics = engine.measure_paragraph(&prepared, 220.0, 22.0);
+    let layout = engine.layout_paragraph(&prepared, 220.0, 22.0);
 
-    assert_eq!(with_runs.height, with_lines.height);
-    assert_eq!(with_runs.line_count, with_lines.line_count);
-    assert_eq!(with_runs.lines.len(), with_lines.lines.len());
+    assert_eq!(layout.height, metrics.height);
+    assert_eq!(layout.line_count, metrics.line_count);
 
-    for (with_run_line, with_line) in with_runs.lines.iter().zip(with_lines.lines.iter()) {
-        assert_eq!(&with_run_line.line, with_line);
-        assert_eq!(with_run_line.runs, engine.line_runs(&prepared, with_line));
+    for line in &layout.lines {
+        assert_eq!(line.runs, engine.line_runs(&prepared, &line.line));
     }
 }
 
 #[test]
 fn layout_next_line_helpers_match_legacy_streaming_paths() {
     let engine = support::bundled_engine();
-    let prepared = engine.prepare_with_segments(
+    let prepared = engine.prepare_paragraph(
         "English قبل العربية and hy\u{00AD}phenation demo back again",
         &support::default_style(),
-        &PrepareOptions::default(),
+        &PretextParagraphOptions::default(),
     );
-    let mut line_cursor = pretext::LayoutCursor::default();
-    let mut glyph_cursor = pretext::LayoutCursor::default();
-    let mut runs_cursor = pretext::LayoutCursor::default();
+    let mut line_cursor = LayoutCursor::default();
+    let mut glyph_cursor = LayoutCursor::default();
+    let mut runs_cursor = LayoutCursor::default();
 
     loop {
         let line = engine.layout_next_line(&prepared, &mut line_cursor, 120.0);

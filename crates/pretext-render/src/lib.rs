@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use lru::LruCache;
 use parking_lot::Mutex;
+use pretext::advanced::ShapedTextSpan;
 use pretext::font_catalog::FontId;
-use pretext::{BidiDirection, PretextEngine, ShapedTextSpan, TextStyleSpec};
+use pretext::{BidiDirection, PretextEngine, PretextStyle as TextStyleSpec};
 
 const RASTER_CACHE_CAPACITY: usize = 1024;
 const GLYPH_PATH_CACHE_CAPACITY: usize = 4096;
@@ -454,8 +455,8 @@ mod tests {
     use super::*;
 
     fn engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(
-            vec![
+        PretextEngine::builder()
+            .with_font_data(vec![
                 include_bytes!("../../../demos/app/assets/fonts/NotoSans-Regular.ttf").to_vec(),
                 include_bytes!("../../../demos/app/assets/fonts/NotoSansArabic-Regular.ttf")
                     .to_vec(),
@@ -464,9 +465,9 @@ mod tests {
                     .to_vec(),
                 include_bytes!("../../../demos/app/assets/fonts/Noto-COLRv1.ttf").to_vec(),
                 include_bytes!("../../../demos/app/assets/fonts/NotoSansMono-Regular.ttf").to_vec(),
-            ],
-            false,
-        )
+            ])
+            .include_system_fonts(false)
+            .build()
     }
 
     fn default_style() -> TextStyleSpec {

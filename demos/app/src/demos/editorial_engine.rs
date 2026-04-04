@@ -7,13 +7,20 @@ use egui::{
     Color32, ColorImage, CornerRadius, CursorIcon, Rect, Sense, Stroke, TextureHandle,
     TextureOptions,
 };
+use pretext::advanced::LayoutCursor;
 #[cfg(test)]
 use pretext::BidiDirection;
 use pretext::{
-    LayoutCursor, LayoutLineGlyphRun, LayoutLineVisualRun, PrepareOptions,
-    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
+    PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode,
 };
-use pretext_egui::{AssetRegistry, PretextFragmentPaintOptions, PretextFragmentPainter};
+#[cfg(test)]
+use pretext_egui::experimental::demo_assets::bundled_font_data;
+use pretext_egui::{
+    advanced::PretextFragmentPainter, EguiPretextPaintOptions, EguiPretextRenderer,
+};
 
 use crate::demos::{DemoPerfStats, DemoWindow};
 use crate::geometry::{Interval, Point, Rect as GeoRect};
@@ -250,7 +257,7 @@ struct HeadlineFit {
 #[derive(Clone)]
 struct CachedSizedTextStyle {
     size_q: u32,
-    style: Arc<pretext::TextStyleSpec>,
+    style: Arc<TextStyleSpec>,
 }
 
 #[derive(Clone)]
@@ -454,7 +461,12 @@ impl DemoWindow for EditorialEngineDemo {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .open(&mut open)
@@ -572,7 +584,7 @@ impl EditorialEngineDemo {
     fn ensure_body_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.body_prepared.is_none() {
             self.body_prepared =
-                Some(engine.prepare_with_segments(BODY_TEXT, body_style(), &normal_options()));
+                Some(engine.prepare_paragraph(BODY_TEXT, body_style(), &normal_options()));
         }
         self.body_prepared
             .as_ref()
@@ -587,9 +599,7 @@ impl EditorialEngineDemo {
             self.pull_quote_prepared = Some(
                 PULL_QUOTE_TEXTS
                     .iter()
-                    .map(|text| {
-                        engine.prepare_with_segments(text, quote_style(), &normal_options())
-                    })
+                    .map(|text| engine.prepare_paragraph(text, quote_style(), &normal_options()))
                     .collect(),
             );
         }
@@ -600,7 +610,7 @@ impl EditorialEngineDemo {
 
     fn ensure_drop_cap_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.drop_cap_prepared.is_none() {
-            self.drop_cap_prepared = Some(engine.prepare_with_segments(
+            self.drop_cap_prepared = Some(engine.prepare_paragraph(
                 &BODY_TEXT.chars().next().unwrap_or('T').to_string(),
                 drop_cap_style(),
                 &normal_options(),
@@ -620,7 +630,7 @@ impl EditorialEngineDemo {
             .expect("editorial drop cap width should exist")
     }
 
-    fn ensure_headline_paint_style(&mut self, font_size: f32) -> &Arc<pretext::TextStyleSpec> {
+    fn ensure_headline_paint_style(&mut self, font_size: f32) -> &Arc<TextStyleSpec> {
         let size_q = quantize_editorial_value(font_size);
         if self
             .headline_paint_style
@@ -643,7 +653,7 @@ impl EditorialEngineDemo {
         cache: &mut Option<CachedChromeLine>,
         engine: &PretextEngine,
         text: &'static str,
-        style: &pretext::TextStyleSpec,
+        style: &TextStyleSpec,
     ) -> Arc<PositionedLine> {
         let engine_revision = engine.revision();
         if cache
@@ -977,13 +987,8 @@ const EDITORIAL_SERIF_FAMILIES: &[&str] = &[
 ];
 const EDITORIAL_SANS_FAMILIES: &[&str] = &["Helvetica Neue", "Helvetica", "Arial", "Noto Sans"];
 
-fn build_text_style(
-    families: &[&str],
-    size_px: f32,
-    weight: u16,
-    italic: bool,
-) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn build_text_style(families: &[&str], size_px: f32, weight: u16, italic: bool) -> TextStyleSpec {
+    TextStyleSpec {
         families: families.iter().map(|name| (*name).to_owned()).collect(),
         size_px,
         weight,
@@ -991,22 +996,22 @@ fn build_text_style(
     }
 }
 
-fn body_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn body_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| build_text_style(EDITORIAL_SERIF_FAMILIES, 18.0, 400, false))
 }
 
-fn quote_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn quote_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| build_text_style(EDITORIAL_SERIF_FAMILIES, QUOTE_TEXT_SIZE, 400, true))
 }
 
-fn headline_style(size_px: f32) -> pretext::TextStyleSpec {
+fn headline_style(size_px: f32) -> TextStyleSpec {
     build_text_style(EDITORIAL_SERIF_FAMILIES, size_px, 700, false)
 }
 
-fn drop_cap_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn drop_cap_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| {
         build_text_style(
             EDITORIAL_SERIF_FAMILIES,
@@ -1017,13 +1022,13 @@ fn drop_cap_style() -> &'static pretext::TextStyleSpec {
     })
 }
 
-fn hint_chrome_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn hint_chrome_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| build_text_style(EDITORIAL_SANS_FAMILIES, 13.0, 400, false))
 }
 
-fn credit_chrome_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn credit_chrome_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| build_text_style(EDITORIAL_SANS_FAMILIES, 11.0, 400, false))
 }
 
@@ -1201,7 +1206,7 @@ fn fit_headline(
         let size = (low + high) / 2;
         let line_height = (size as f32 * 0.93).round();
         let prepared =
-            engine.prepare_with_segments(HEADLINE, &headline_style(size as f32), &normal_options());
+            engine.prepare_paragraph(HEADLINE, &headline_style(size as f32), &normal_options());
         let mut line_count = 0usize;
         let breaks_word = headline_breaks_inside_word(engine, &prepared, max_width);
         engine.walk_line_ranges(&prepared, max_width, |_| {
@@ -1212,7 +1217,7 @@ fn fit_headline(
         if !breaks_word && total_height <= max_height {
             best_size = size as f32;
             best_line_height = line_height;
-            let layout = engine.layout_with_runs(&prepared, max_width, line_height);
+            let layout = engine.layout_paragraph(&prepared, max_width, line_height);
             best_lines = layout
                 .lines
                 .into_iter()
@@ -1490,7 +1495,7 @@ fn compute_static_editorial_projection(
             let prepared = &pull_quote_prepared[index];
             let quote_width = (layout.column_width * placement.w_frac).round();
             let quote_layout =
-                engine.layout_with_runs(prepared, (quote_width - 20.0).max(1.0), QUOTE_LINE_HEIGHT);
+                engine.layout_paragraph(prepared, (quote_width - 20.0).max(1.0), QUOTE_LINE_HEIGHT);
             let quote_height = quote_layout.lines.len() as f32 * QUOTE_LINE_HEIGHT + 16.0;
             let column_x = layout.content_left
                 + placement.col_idx as f32 * (layout.column_width + layout.col_gap);
@@ -2278,11 +2283,11 @@ fn circle_interval_for_band(
 fn build_positioned_single_line(
     engine: &PretextEngine,
     text: &str,
-    style: &pretext::TextStyleSpec,
+    style: &TextStyleSpec,
     x: f32,
     y: f32,
 ) -> Option<PositionedLine> {
-    let prepared = engine.prepare_with_segments(text, style, &normal_options());
+    let prepared = engine.prepare_paragraph(text, style, &normal_options());
     let mut cursor = LayoutCursor::default();
     let line = engine.layout_next_line_with_runs(&prepared, &mut cursor, UNBOUNDED_WIDTH)?;
     Some(PositionedLine {
@@ -2481,10 +2486,10 @@ fn paint_projection(
     painter: &egui::Painter,
     projection: EditorialProjectionRef<'_>,
     layout: &EditorialLayout,
-    headline_text_style: &pretext::TextStyleSpec,
+    headline_text_style: &TextStyleSpec,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     let headline_options = fragment_paint_options(
         headline_text_style,
@@ -2558,11 +2563,11 @@ fn paint_projection(
 }
 
 fn fragment_paint_options(
-    style: &pretext::TextStyleSpec,
+    style: &TextStyleSpec,
     line_height: f32,
     color: Color32,
-) -> PretextFragmentPaintOptions<'_> {
-    PretextFragmentPaintOptions::new(style, line_height)
+) -> EguiPretextPaintOptions<'_> {
+    EguiPretextPaintOptions::new(style, line_height)
         .color(color)
         .fallback_font(egui::FontId::new(
             style.size_px,
@@ -2574,10 +2579,10 @@ fn fragment_paint_options(
 fn queue_positioned_lines<'a>(
     fragment_painter: &mut PretextFragmentPainter,
     lines: impl IntoIterator<Item = &'a PositionedLine>,
-    options: &PretextFragmentPaintOptions<'_>,
+    options: &EguiPretextPaintOptions<'_>,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     for line in lines {
         fragment_painter.push_fragment(
@@ -2626,7 +2631,7 @@ fn paint_editorial_chrome(
     credit_line: Option<&PositionedLine>,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     if hint_line.is_none() && credit_line.is_none() {
         return;
@@ -2706,16 +2711,16 @@ mod tests {
         StaticEditorialProjection,
         Vec<Orb>,
     ) {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let body = engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options());
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let body = engine.prepare_paragraph(BODY_TEXT, &body_style(), &normal_options());
         let pull_quotes = PULL_QUOTE_TEXTS
             .iter()
-            .map(|text| engine.prepare_with_segments(text, &quote_style(), &normal_options()))
+            .map(|text| engine.prepare_paragraph(text, &quote_style(), &normal_options()))
             .collect::<Vec<_>>();
-        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let drop_cap = engine.prepare_paragraph("T", &drop_cap_style(), &normal_options());
         let layout = build_editorial_layout(
             page,
             &engine,
@@ -2749,16 +2754,16 @@ mod tests {
 
     #[test]
     fn orb_obstacles_change_editorial_projection() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let body = engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options());
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let body = engine.prepare_paragraph(BODY_TEXT, &body_style(), &normal_options());
         let pull_quotes = PULL_QUOTE_TEXTS
             .iter()
-            .map(|text| engine.prepare_with_segments(text, &quote_style(), &normal_options()))
+            .map(|text| engine.prepare_paragraph(text, &quote_style(), &normal_options()))
             .collect::<Vec<_>>();
-        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let drop_cap = engine.prepare_paragraph("T", &drop_cap_style(), &normal_options());
         let page = GeoRect {
             x: 0.0,
             y: 0.0,
@@ -2828,16 +2833,16 @@ mod tests {
 
     #[test]
     fn pull_quotes_stay_fixed_when_orbs_move() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let body = engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options());
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let body = engine.prepare_paragraph(BODY_TEXT, &body_style(), &normal_options());
         let pull_quotes = PULL_QUOTE_TEXTS
             .iter()
-            .map(|text| engine.prepare_with_segments(text, &quote_style(), &normal_options()))
+            .map(|text| engine.prepare_paragraph(text, &quote_style(), &normal_options()))
             .collect::<Vec<_>>();
-        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let drop_cap = engine.prepare_paragraph("T", &drop_cap_style(), &normal_options());
         let page = GeoRect {
             x: 0.0,
             y: 0.0,
@@ -2884,16 +2889,16 @@ mod tests {
 
     #[test]
     fn editorial_projection_is_deterministic() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let body = engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options());
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let body = engine.prepare_paragraph(BODY_TEXT, &body_style(), &normal_options());
         let pull_quotes = PULL_QUOTE_TEXTS
             .iter()
-            .map(|text| engine.prepare_with_segments(text, &quote_style(), &normal_options()))
+            .map(|text| engine.prepare_paragraph(text, &quote_style(), &normal_options()))
             .collect::<Vec<_>>();
-        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let drop_cap = engine.prepare_paragraph("T", &drop_cap_style(), &normal_options());
         let page = GeoRect {
             x: 0.0,
             y: 0.0,
@@ -2928,11 +2933,11 @@ mod tests {
 
     #[test]
     fn layout_body_band_reuses_supplied_line_storage() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "This paragraph is long enough to produce different first-line fits when the slot width changes between otherwise identical editorial bands.",
             &body_style(),
             &normal_options(),
@@ -3260,10 +3265,10 @@ mod tests {
             width: 1200.0,
             height: 760.0,
         };
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut demo = EditorialEngineDemo::default();
 
         demo.ensure_orbs(page);
@@ -3287,11 +3292,11 @@ mod tests {
 
     #[test]
     fn editorial_layout_keeps_visual_runs_for_mixed_direction_text() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "English قبل العربية and then back again",
             &body_style(),
             &normal_options(),
@@ -3333,16 +3338,13 @@ mod tests {
 
     #[test]
     fn headline_fit_avoids_mid_word_breaks() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let fit = fit_headline(&engine, 920.0, 180.0, HEADLINE_MAX_SIZE);
-        let prepared = engine.prepare_with_segments(
-            HEADLINE,
-            &headline_style(fit.font_size),
-            &normal_options(),
-        );
+        let prepared =
+            engine.prepare_paragraph(HEADLINE, &headline_style(fit.font_size), &normal_options());
 
         assert!(fit.font_size >= HEADLINE_MIN_SIZE as f32);
         assert!(!headline_breaks_inside_word(&engine, &prepared, 920.0));
@@ -3350,16 +3352,16 @@ mod tests {
 
     #[test]
     fn wide_layout_places_two_pull_quotes_and_narrow_layout_hides_them() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let body = engine.prepare_with_segments(BODY_TEXT, &body_style(), &normal_options());
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let body = engine.prepare_paragraph(BODY_TEXT, &body_style(), &normal_options());
         let pull_quotes = PULL_QUOTE_TEXTS
             .iter()
-            .map(|text| engine.prepare_with_segments(text, &quote_style(), &normal_options()))
+            .map(|text| engine.prepare_paragraph(text, &quote_style(), &normal_options()))
             .collect::<Vec<_>>();
-        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let drop_cap = engine.prepare_paragraph("T", &drop_cap_style(), &normal_options());
 
         let wide_page = GeoRect {
             x: 0.0,
@@ -3418,11 +3420,11 @@ mod tests {
 
     #[test]
     fn default_width_layout_uses_compact_editorial_tuning() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let drop_cap = engine.prepare_with_segments("T", &drop_cap_style(), &normal_options());
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let drop_cap = engine.prepare_paragraph("T", &drop_cap_style(), &normal_options());
         let layout = build_editorial_layout(
             GeoRect {
                 x: 0.0,
@@ -3493,10 +3495,10 @@ mod tests {
 
     #[test]
     fn chrome_line_cache_reuses_positioned_line_for_same_engine_revision() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut cache = None;
 
         let first = EditorialEngineDemo::ensure_cached_chrome_line(

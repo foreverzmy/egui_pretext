@@ -1,5 +1,7 @@
 use pretext::{
-    LayoutCursor, PrepareOptions, PreparedTextWithSegments, PretextEngine, TextStyleSpec,
+    advanced::LayoutCursor, ParagraphDirection, PretextEngine,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
     WhiteSpaceMode,
 };
 use serde::{Deserialize, Serialize};
@@ -111,8 +113,8 @@ impl GeoRect {
 }
 
 pub fn compute_editorial_golden(engine: &PretextEngine) -> EditorialGolden {
-    let body = engine.prepare_with_segments(&BODY_TEXT[1..], &body_style(), &normal_options());
-    let quote = engine.prepare_with_segments(PULL_QUOTE, &quote_style(), &normal_options());
+    let body = engine.prepare_paragraph(&BODY_TEXT[1..], &body_style(), &normal_options());
+    let quote = engine.prepare_paragraph(PULL_QUOTE, &quote_style(), &normal_options());
     let page = GeoRect {
         x: 0.0,
         y: 0.0,
@@ -130,7 +132,7 @@ pub fn compute_editorial_golden(engine: &PretextEngine) -> EditorialGolden {
         })
         .collect();
     let quote_layout =
-        engine.layout_with_lines(&quote, layout.pull_quote_rect.width, QUOTE_LINE_HEIGHT);
+        engine.layout_paragraph(&quote, layout.pull_quote_rect.width, QUOTE_LINE_HEIGHT);
     let pull_quote_lines = quote_layout
         .lines
         .into_iter()
@@ -138,8 +140,8 @@ pub fn compute_editorial_golden(engine: &PretextEngine) -> EditorialGolden {
         .map(|(index, line)| PositionedLine {
             x: layout.pull_quote_rect.x,
             y: layout.pull_quote_rect.y + index as f32 * QUOTE_LINE_HEIGHT,
-            width: line.width,
-            text: line.text,
+            width: line.line.width,
+            text: line.line.text,
         })
         .collect::<Vec<_>>();
     let (mut col1, cursor1) = layout_column(
@@ -183,7 +185,7 @@ pub fn compute_editorial_golden(engine: &PretextEngine) -> EditorialGolden {
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
-        paragraph_direction: pretext::ParagraphDirection::Auto,
+        paragraph_direction: ParagraphDirection::Auto,
     }
 }
 

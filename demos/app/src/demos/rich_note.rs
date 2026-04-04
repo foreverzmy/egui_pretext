@@ -3,16 +3,20 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense,
     Stroke, StrokeKind, UiBuilder,
 };
-#[cfg(test)]
+use pretext::advanced::LayoutCursor;
 use pretext::BidiDirection;
 use pretext::{
-    LayoutCursor, LayoutLineGlyphRun, LayoutLineVisualRun, PrepareOptions,
-    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
+    PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode,
 };
 use pretext_egui::{
-    paint_styled_positioned_text_runs, split_builtin_emoji_glyphs, AssetRegistry, BaselineMode,
-    EmojiOverlayOptions, EmojiOverlayRun, PretextFragmentPaintOptions, ShapedTextRasterRequest,
-    StyledPositionedTextRunRef,
+    advanced::{
+        paint_styled_positioned_text_runs, split_builtin_emoji_glyphs, EmojiOverlayOptions,
+        EmojiOverlayRun, StyledPositionedTextRunRef,
+    },
+    BaselineMode, EguiPretextPaintOptions, EguiPretextRenderer, PretextTextureRasterRequest,
 };
 use std::sync::OnceLock;
 
@@ -128,7 +132,7 @@ struct FragmentPaintMetrics {
 struct TextStyleModel {
     style_name: TextStyleName,
     chrome_width: f32,
-    spec: &'static pretext::TextStyleSpec,
+    spec: &'static TextStyleSpec,
 }
 
 #[derive(Clone)]
@@ -310,7 +314,12 @@ impl DemoWindow for RichNoteDemo {
         self.open = open;
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .open(&mut open)
@@ -333,7 +342,7 @@ impl RichNoteDemo {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let outer_width = ui.available_width().max(320.0);
         let page_gutter = if outer_width <= MOBILE_BREAKPOINT {
@@ -535,7 +544,7 @@ fn paint_preview(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     body_width: f32,
     note_body_height: f32,
     lines: &[RichLine],
@@ -596,13 +605,8 @@ fn text_style_model(style_name: TextStyleName) -> TextStyleModel {
     }
 }
 
-fn build_text_style(
-    families: &[&str],
-    size_px: f32,
-    weight: u16,
-    italic: bool,
-) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn build_text_style(families: &[&str], size_px: f32, weight: u16, italic: bool) -> TextStyleSpec {
+    TextStyleSpec {
         families: families.iter().map(|name| (*name).to_owned()).collect(),
         size_px,
         weight,
@@ -610,8 +614,8 @@ fn build_text_style(
     }
 }
 
-fn body_text_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn body_text_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| {
         build_text_style(
             &[
@@ -631,8 +635,8 @@ fn body_text_style() -> &'static pretext::TextStyleSpec {
     })
 }
 
-fn link_text_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn link_text_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| {
         build_text_style(
             &[
@@ -652,8 +656,8 @@ fn link_text_style() -> &'static pretext::TextStyleSpec {
     })
 }
 
-fn code_text_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn code_text_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| {
         build_text_style(
             &[
@@ -671,8 +675,8 @@ fn code_text_style() -> &'static pretext::TextStyleSpec {
     })
 }
 
-fn chip_text_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn chip_text_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| {
         build_text_style(
             &[
@@ -707,15 +711,15 @@ fn measure_single_line_width(engine: &PretextEngine, prepared: &PreparedTextWith
     max_width
 }
 
-fn measure_collapsed_space_width(engine: &PretextEngine, style: &pretext::TextStyleSpec) -> f32 {
-    let joined = engine.prepare_with_segments("A A", style, &normal_options());
-    let compact = engine.prepare_with_segments("AA", style, &normal_options());
+fn measure_collapsed_space_width(engine: &PretextEngine, style: &TextStyleSpec) -> f32 {
+    let joined = engine.prepare_paragraph("A A", style, &normal_options());
+    let compact = engine.prepare_paragraph("AA", style, &normal_options());
     (measure_single_line_width(engine, &joined) - measure_single_line_width(engine, &compact))
         .max(0.0)
 }
 
 fn fragment_overlay_options(
-    style: &pretext::TextStyleSpec,
+    style: &TextStyleSpec,
     metrics: FragmentPaintMetrics,
 ) -> EmojiOverlayOptions<'_> {
     EmojiOverlayOptions {
@@ -739,7 +743,7 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
         match *spec {
             RichInlineSpec::Chip { label, tone } => {
                 let label_prepared =
-                    engine.prepare_with_segments(label, chip_text_style(), &normal_options());
+                    engine.prepare_paragraph(label, chip_text_style(), &normal_options());
                 let mut label_cursor = LINE_START_CURSOR;
                 let label_line = engine
                     .layout_next_line_with_runs(&label_prepared, &mut label_cursor, UNBOUNDED_WIDTH)
@@ -782,7 +786,7 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
 
                 let style_model = text_style_model(style);
                 let prepared =
-                    engine.prepare_with_segments(trimmed_text, style_model.spec, &normal_options());
+                    engine.prepare_paragraph(trimmed_text, style_model.spec, &normal_options());
                 let mut cursor = LINE_START_CURSOR;
                 let Some(whole_line) =
                     engine.layout_next_line_with_runs(&prepared, &mut cursor, UNBOUNDED_WIDTH)
@@ -990,7 +994,7 @@ fn paint_rich_note_body(
     lines: &[RichLine],
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     let body_left = rect.left();
     let body_top = rect.top();
@@ -1150,7 +1154,7 @@ fn rich_note_text_run<'a>(
     fragment: &'a LineFragment,
     metrics: FragmentPaintMetrics,
     fallback_family: FontFamily,
-    style: &'static pretext::TextStyleSpec,
+    style: &'static TextStyleSpec,
     color: Color32,
     emoji_size: f32,
 ) -> StyledPositionedTextRunRef<'a, 'static> {
@@ -1160,7 +1164,7 @@ fn rich_note_text_run<'a>(
         text: &fragment.text,
         glyph_runs: &fragment.glyph_runs,
         emoji_overlays: &fragment.emoji_overlays,
-        options: PretextFragmentPaintOptions::new(style, metrics.slot_height)
+        options: EguiPretextPaintOptions::new(style, metrics.slot_height)
             .color(color)
             .fallback_font(FontId::new(style.size_px, fallback_family))
             .fallback_align(Align2::LEFT_TOP)
@@ -1172,19 +1176,17 @@ fn rich_note_text_run<'a>(
 #[cfg_attr(not(test), allow(dead_code))]
 fn rich_shaped_text_request<'a>(
     text: &'a str,
-    style: &'a pretext::TextStyleSpec,
-    direction: pretext::BidiDirection,
-    color: Color32,
-    fragment_width: f32,
+    style: &'a TextStyleSpec,
+    direction: BidiDirection,
+    _color: Color32,
+    _fragment_width: f32,
     metrics: FragmentPaintMetrics,
     baseline_mode: BaselineMode,
-) -> ShapedTextRasterRequest<'a> {
-    ShapedTextRasterRequest {
+) -> PretextTextureRasterRequest<'a> {
+    PretextTextureRasterRequest {
         text,
         style,
         direction,
-        color,
-        fragment_width,
         slot_height: metrics.slot_height,
         padding_x: SHAPED_TEXT_PAD_X,
         padding_y: SHAPED_TEXT_PAD_Y,
@@ -1201,7 +1203,10 @@ mod tests {
     use egui::{RawInput, TextureId};
 
     fn bundled_engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+        PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build()
     }
 
     fn shape_uses_user_texture(shape: &egui::Shape) -> bool {
@@ -1312,8 +1317,8 @@ mod tests {
     fn rich_note_render_emits_texture_shapes_for_mixed_emoji_and_arabic() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
-        assets.install_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        pretext_egui::experimental::demo_assets::install_demo_fonts(&ctx);
 
         let mut demo = RichNoteDemo {
             open: true,
@@ -1337,7 +1342,7 @@ mod tests {
         let output = ctx.run(raw_input(1.0), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
-        let stats = assets.stats_snapshot();
+        let stats = assets.stats();
 
         assert!(output
             .shapes
@@ -1351,12 +1356,12 @@ mod tests {
     fn rich_note_arabic_textures_materialize_for_body_and_chip_slots() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
+        let mut assets = EguiPretextRenderer::default();
 
         let body_request = rich_shaped_text_request(
             "عربي",
             text_style_model(TextStyleName::Body).spec,
-            pretext::BidiDirection::Rtl,
+            BidiDirection::Rtl,
             INK,
             36.0,
             FragmentPaintMetrics {
@@ -1368,7 +1373,7 @@ mod tests {
         let chip_request = rich_shaped_text_request(
             "جاهز",
             chip_text_style(),
-            pretext::BidiDirection::Rtl,
+            BidiDirection::Rtl,
             chip_palette(ChipTone::Status).2,
             24.0,
             FragmentPaintMetrics {
@@ -1379,15 +1384,15 @@ mod tests {
         );
 
         let body = assets
-            .shaped_text_texture(&engine, body_request, &ctx)
+            .rasterize_text_texture(&engine, body_request, &ctx)
             .expect("body arabic texture should exist");
         let body_cached = assets
-            .shaped_text_texture(&engine, body_request, &ctx)
+            .rasterize_text_texture(&engine, body_request, &ctx)
             .expect("cached body arabic texture should exist");
         let chip = assets
-            .shaped_text_texture(&engine, chip_request, &ctx)
+            .rasterize_text_texture(&engine, chip_request, &ctx)
             .expect("chip arabic texture should exist");
-        let stats = assets.stats_snapshot();
+        let stats = assets.stats();
 
         assert_eq!(body.handle.id(), body_cached.handle.id());
         assert_eq!(body.logical_size, body_cached.logical_size);

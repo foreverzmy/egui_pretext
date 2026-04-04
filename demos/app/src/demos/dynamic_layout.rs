@@ -6,14 +6,21 @@ use egui::epaint::{Mesh, Vertex};
 use egui::{
     Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Shape, Stroke, StrokeKind,
 };
+use pretext::advanced::LayoutCursor;
 #[cfg(test)]
 use pretext::BidiDirection;
 use pretext::{
-    LayoutCursor, LayoutLineGlyphRun, LayoutLineVisualRun, PrepareOptions,
-    PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
+    PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode,
 };
+#[cfg(test)]
+use pretext_egui::experimental::demo_assets::bundled_font_data;
 use pretext_egui::{
-    AssetRegistry, PretextFragmentPaintOptions, PretextFragmentPainter, SvgAssetId,
+    advanced::PretextFragmentPainter,
+    experimental::demo_assets::{bundled_svg_texture, svg_bytes, SvgAssetId},
+    EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
 use crate::demos::{DemoPerfStats, DemoWindow};
@@ -264,7 +271,7 @@ struct DynamicColumnCacheStats {
 #[derive(Clone)]
 struct CachedSizedTextStyle {
     size_q: u32,
-    style: Arc<pretext::TextStyleSpec>,
+    style: Arc<TextStyleSpec>,
 }
 
 #[derive(Clone)]
@@ -407,7 +414,12 @@ impl DemoWindow for DynamicLayoutDemo {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .open(&mut open)
@@ -517,9 +529,9 @@ impl DemoWindow for DynamicLayoutDemo {
                 );
 
                 let openai_texture =
-                    assets.bundled_svg_texture(SvgAssetId::OpenAiLogo, LOGO_RASTER_SIZE, ctx);
+                    bundled_svg_texture(assets, SvgAssetId::OpenAiLogo, LOGO_RASTER_SIZE, ctx);
                 let claude_texture =
-                    assets.bundled_svg_texture(SvgAssetId::ClaudeLogo, LOGO_RASTER_SIZE, ctx);
+                    bundled_svg_texture(assets, SvgAssetId::ClaudeLogo, LOGO_RASTER_SIZE, ctx);
                 paint_rotated_texture(
                     &painter,
                     layout.openai_rect,
@@ -594,7 +606,7 @@ impl DynamicLayoutDemo {
     fn ensure_body_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.body_prepared.is_none() {
             self.body_prepared =
-                Some(engine.prepare_with_segments(BODY_COPY, body_style(), &normal_options()));
+                Some(engine.prepare_paragraph(BODY_COPY, body_style(), &normal_options()));
         }
         self.body_prepared
             .as_ref()
@@ -604,7 +616,7 @@ impl DynamicLayoutDemo {
     fn ensure_credit_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.credit_prepared.is_none() {
             self.credit_prepared =
-                Some(engine.prepare_with_segments(CREDIT_TEXT, credit_style(), &normal_options()));
+                Some(engine.prepare_paragraph(CREDIT_TEXT, credit_style(), &normal_options()));
         }
         self.credit_prepared
             .as_ref()
@@ -628,7 +640,7 @@ impl DynamicLayoutDemo {
     ) -> &PreparedTextWithSegments {
         let size_q = quantize_dynamic_value(headline_size);
         if self.headline_prepared_size_q != Some(size_q) || self.headline_prepared.is_none() {
-            self.headline_prepared = Some(engine.prepare_with_segments(
+            self.headline_prepared = Some(engine.prepare_paragraph(
                 HEADLINE,
                 &headline_style(headline_size),
                 &normal_options(),
@@ -640,7 +652,7 @@ impl DynamicLayoutDemo {
             .expect("dynamic headline should be prepared")
     }
 
-    fn ensure_headline_paint_style(&mut self, headline_size: f32) -> &Arc<pretext::TextStyleSpec> {
+    fn ensure_headline_paint_style(&mut self, headline_size: f32) -> &Arc<TextStyleSpec> {
         let size_q = quantize_dynamic_value(headline_size);
         if self
             .headline_paint_style
@@ -661,16 +673,10 @@ impl DynamicLayoutDemo {
 
     fn ensure_hulls(&mut self) -> &LogoHulls {
         if self.hulls.is_none() {
-            let openai = svg_alpha_hull(
-                AssetRegistry::svg_bytes(SvgAssetId::OpenAiLogo),
-                LOGO_RASTER_SIZE,
-            )
-            .expect("openai hull");
-            let claude = svg_alpha_hull(
-                AssetRegistry::svg_bytes(SvgAssetId::ClaudeLogo),
-                LOGO_RASTER_SIZE,
-            )
-            .expect("claude hull");
+            let openai = svg_alpha_hull(svg_bytes(SvgAssetId::OpenAiLogo), LOGO_RASTER_SIZE)
+                .expect("openai hull");
+            let claude = svg_alpha_hull(svg_bytes(SvgAssetId::ClaudeLogo), LOGO_RASTER_SIZE)
+                .expect("claude hull");
             self.hulls = Some(LogoHulls { openai, claude });
         }
         self.hulls.as_ref().expect("dynamic hulls should exist")
@@ -858,13 +864,8 @@ const DYNAMIC_SERIF_FAMILIES: &[&str] = &[
 ];
 const DYNAMIC_SANS_FAMILIES: &[&str] = &["Helvetica Neue", "Helvetica", "Arial", "Noto Sans"];
 
-fn build_text_style(
-    families: &[&str],
-    size_px: f32,
-    weight: u16,
-    italic: bool,
-) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn build_text_style(families: &[&str], size_px: f32, weight: u16, italic: bool) -> TextStyleSpec {
+    TextStyleSpec {
         families: families.iter().map(|name| (*name).to_owned()).collect(),
         size_px,
         weight,
@@ -872,17 +873,17 @@ fn build_text_style(
     }
 }
 
-fn body_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn body_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| build_text_style(DYNAMIC_SERIF_FAMILIES, 20.0, 450, false))
 }
 
-fn headline_style(size_px: f32) -> pretext::TextStyleSpec {
+fn headline_style(size_px: f32) -> TextStyleSpec {
     build_text_style(DYNAMIC_SERIF_FAMILIES, size_px, 700, false)
 }
 
-fn credit_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn credit_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| build_text_style(DYNAMIC_SANS_FAMILIES, 12.0, 500, false))
 }
 
@@ -916,7 +917,7 @@ fn fit_headline_font_size(engine: &PretextEngine, headline_width: f32, page_widt
     while low <= high {
         let size = (low + high) / 2;
         let prepared =
-            engine.prepare_with_segments(HEADLINE, &headline_style(size as f32), &normal_options());
+            engine.prepare_paragraph(HEADLINE, &headline_style(size as f32), &normal_options());
         if !headline_breaks_inside_word(engine, &prepared, headline_width) {
             best = size;
             low = size + 1;
@@ -2239,11 +2240,11 @@ fn cached_logo_geometry(
 }
 
 fn fragment_paint_options(
-    style: &pretext::TextStyleSpec,
+    style: &TextStyleSpec,
     line_height: f32,
     color: Color32,
-) -> PretextFragmentPaintOptions<'_> {
-    PretextFragmentPaintOptions::new(style, line_height)
+) -> EguiPretextPaintOptions<'_> {
+    EguiPretextPaintOptions::new(style, line_height)
         .color(color)
         .fallback_font(egui::FontId::new(
             style.size_px,
@@ -2255,10 +2256,10 @@ fn fragment_paint_options(
 fn queue_positioned_lines<'a>(
     fragment_painter: &mut PretextFragmentPainter,
     lines: impl IntoIterator<Item = &'a PositionedLine>,
-    options: &PretextFragmentPaintOptions<'_>,
+    options: &EguiPretextPaintOptions<'_>,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     for line in lines {
         fragment_painter.push_fragment(
@@ -2416,16 +2417,10 @@ mod tests {
 
     #[test]
     fn dynamic_logo_hulls_load_from_svg() {
-        let openai = svg_alpha_hull(
-            AssetRegistry::svg_bytes(SvgAssetId::OpenAiLogo),
-            LOGO_RASTER_SIZE,
-        )
-        .expect("openai hull");
-        let claude = svg_alpha_hull(
-            AssetRegistry::svg_bytes(SvgAssetId::ClaudeLogo),
-            LOGO_RASTER_SIZE,
-        )
-        .expect("claude hull");
+        let openai = svg_alpha_hull(svg_bytes(SvgAssetId::OpenAiLogo), LOGO_RASTER_SIZE)
+            .expect("openai hull");
+        let claude = svg_alpha_hull(svg_bytes(SvgAssetId::ClaudeLogo), LOGO_RASTER_SIZE)
+            .expect("claude hull");
         assert!(!openai.is_empty());
         assert!(!claude.is_empty());
     }
@@ -2453,11 +2448,11 @@ mod tests {
 
     #[test]
     fn lines_route_around_obstacle_rect() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "This paragraph should be forced to route around an obstacle in the middle of the column so the first few lines shift to the right before the flow returns to the left edge.",
             &body_style(),
             &normal_options(),
@@ -2499,11 +2494,11 @@ mod tests {
 
     #[test]
     fn band_interval_cache_matches_rect_obstacle_layout() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "This paragraph should be forced to route around an obstacle in the middle of the column so the first few lines shift to the right before the flow returns to the left edge.",
             &body_style(),
             &normal_options(),
@@ -2563,11 +2558,11 @@ mod tests {
 
     #[test]
     fn incremental_column_matches_fresh_after_dirty_suffix_with_skipped_band_prefix() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "This paragraph is long enough to fill several bands so we can move a fully blocking obstacle farther down the column and verify that incremental rebuilding truncates output lines at the right visible prefix instead of using the raw band index.",
             &body_style(),
             &normal_options(),
@@ -2645,11 +2640,11 @@ mod tests {
 
     #[test]
     fn positioned_lines_keep_visual_runs_for_mixed_direction_text() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "English قبل العربية and back again",
             &body_style(),
             &normal_options(),
@@ -2691,13 +2686,12 @@ mod tests {
 
     #[test]
     fn fitted_headline_size_avoids_mid_word_breaks() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let size = fit_headline_font_size(&engine, 620.0, 1040.0);
-        let prepared =
-            engine.prepare_with_segments(HEADLINE, &headline_style(size), &normal_options());
+        let prepared = engine.prepare_paragraph(HEADLINE, &headline_style(size), &normal_options());
 
         assert!(size >= 22.0);
         assert!(!headline_breaks_inside_word(&engine, &prepared, 620.0));
@@ -2705,10 +2699,10 @@ mod tests {
 
     #[test]
     fn default_width_layout_uses_compact_mode() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let layout = build_page_layout(
             Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 760.0)),
             &engine,
@@ -2723,10 +2717,10 @@ mod tests {
 
     #[test]
     fn projection_reuses_cached_headline_prepare_across_angle_updates() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut demo = DynamicLayoutDemo::default();
         let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
 
@@ -2759,10 +2753,10 @@ mod tests {
 
     #[test]
     fn projection_reuses_cached_geometry_within_reflow_bucket() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut demo = DynamicLayoutDemo::default();
         let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
 
@@ -2800,10 +2794,10 @@ mod tests {
 
     #[test]
     fn projection_reflows_only_dirty_suffix_across_bucket_change() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut demo = DynamicLayoutDemo::default();
         let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
 
@@ -2838,10 +2832,10 @@ mod tests {
 
     #[test]
     fn projection_reuses_headline_credit_and_left_column_when_only_claude_changes() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut demo = DynamicLayoutDemo::default();
         let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
 
@@ -2963,10 +2957,10 @@ mod tests {
 
     #[test]
     fn incremental_plan_build_matches_fresh_projection_after_bucket_change() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let mut demo = DynamicLayoutDemo::default();
         let page_rect = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 760.0));
 

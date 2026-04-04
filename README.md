@@ -7,9 +7,62 @@ This workspace follows [plan.md](/Users/bytedance/Workspace/demos/pretext/plan.m
 ## Workspace
 
 - `crates/pretext`
-  Pure layout engine: whitespace analysis, bidi, font fallback, shaping, line breaking, and the four layout APIs.
+  Stable layout SDK: paragraph preparation, measurement, layout, bidi, shaping, and runtime stats.
+- `crates/pretext-egui`
+  Stable `egui` renderer SDK: paragraph painting, glyph atlas, and texture rasterization. `advanced` contains low-level rendering helpers; `experimental` contains demo-only bundled assets.
 - `demos/app`
   `eframe` desktop demo shell with the catalog, accordion, bubbles, rich note, masonry, variable typographic ASCII, dynamic layout, and editorial engine demos.
+
+## Stable SDK
+
+Use the root exports for the standard path:
+
+- `pretext::PretextEngine::builder()`
+- `pretext::PretextStyle`
+- `pretext::PretextParagraphOptions`
+- `pretext::PretextPreparedParagraph`
+- `pretext_egui::EguiPretextRenderer`
+- `pretext_egui::EguiPretextPaintOptions`
+
+Use `pretext::advanced` or `pretext_egui::advanced` only for cursor-driven layout, obstacle flow, glyph-scene painting, or custom shaping/rendering. For lower-level `pretext` flows, `pretext::advanced::{prepare_text, measure_text, layout_lines}` keeps those entry points out of the stable root path. For renderer internals, `pretext_egui::advanced` exposes helpers such as `paint_line_glyph_runs`, `enqueue_atlas_warmup`, `tick_atlas_warmup`, and the glyph-scene builders. Demo fonts, SVG logos, and bundled emoji assets live under `pretext_egui::experimental::demo_assets`.
+
+Minimal engine example:
+
+```rust
+use pretext::{
+    PretextEngine, PretextParagraphOptions, PretextStyle, WhiteSpaceMode,
+};
+
+let engine = PretextEngine::builder().build();
+let style = PretextStyle {
+    families: vec!["Times New Roman".to_owned(), "Arial".to_owned()],
+    size_px: 18.0,
+    weight: 400,
+    italic: false,
+};
+let options = PretextParagraphOptions {
+    white_space: WhiteSpaceMode::Normal,
+    ..Default::default()
+};
+
+let prepared = engine.prepare_paragraph("Hello, pretext.", &style, &options);
+let metrics = prepared.measure(&engine, 320.0, 24.0);
+let layout = prepared.layout(&engine, 320.0, 24.0);
+
+assert!(metrics.line_count >= 1);
+assert_eq!(layout.line_count, metrics.line_count);
+```
+
+Minimal `egui` example:
+
+```rust
+use pretext_egui::{EguiPretextPaintOptions, EguiPretextRenderer};
+
+let mut renderer = EguiPretextRenderer::default();
+let paint = EguiPretextPaintOptions::new(&style, 24.0);
+
+renderer.paint_paragraph(ui.painter(), ui.min_rect().min, &layout, &paint, ui.ctx(), &engine);
+```
 
 ## Run
 

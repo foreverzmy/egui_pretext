@@ -2,12 +2,16 @@ use std::time::Duration;
 
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Stroke, StrokeKind};
+use pretext::advanced::LayoutCursor;
 use pretext::{
-    LayoutCursor, LayoutLineGlyphRun, PrepareOptions, PreparedTextWithSegments, PretextEngine,
-    TextStyleSpec, WhiteSpaceMode,
+    PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    WhiteSpaceMode,
 };
 use pretext_egui::{
-    paint_positioned_text_runs, AssetRegistry, PositionedTextRunRef, PretextFragmentPaintOptions,
+    advanced::{paint_positioned_text_runs, PositionedTextRunRef},
+    EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
 use crate::demos::DemoWindow;
@@ -122,7 +126,12 @@ impl DemoWindow for DragonThroughTextDemo {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .open(&mut open)
@@ -224,18 +233,12 @@ impl DragonThroughTextDemo {
 
     fn ensure_prepared(&mut self, engine: &PretextEngine) {
         if self.left_prepared.is_none() {
-            self.left_prepared = Some(engine.prepare_with_segments(
-                BODY_TEXT_LEFT,
-                &body_style(),
-                &normal_options(),
-            ));
+            self.left_prepared =
+                Some(engine.prepare_paragraph(BODY_TEXT_LEFT, &body_style(), &normal_options()));
         }
         if self.right_prepared.is_none() {
-            self.right_prepared = Some(engine.prepare_with_segments(
-                BODY_TEXT_RIGHT,
-                &body_style(),
-                &normal_options(),
-            ));
+            self.right_prepared =
+                Some(engine.prepare_paragraph(BODY_TEXT_RIGHT, &body_style(), &normal_options()));
         }
     }
 
@@ -683,10 +686,10 @@ fn paint_positioned_lines(
     color: Color32,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     let clipped = painter.with_clip_rect(clip_rect);
-    let options = PretextFragmentPaintOptions::new(style, line_height)
+    let options = EguiPretextPaintOptions::new(style, line_height)
         .color(color)
         .fallback_font(FontId::new(style.size_px, FontFamily::Proportional))
         .fallback_align(Align2::LEFT_TOP);
@@ -836,11 +839,11 @@ mod tests {
 
     #[test]
     fn dragon_layout_can_fill_multiple_slots_in_one_band() {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
-        let prepared = engine.prepare_with_segments(
+        let engine = PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build();
+        let prepared = engine.prepare_paragraph(
             "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen",
             &body_style(),
             &normal_options(),

@@ -5,10 +5,14 @@ use egui::{
     Color32, ColorImage, CornerRadius, Label, Rect, RichText, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions,
 };
-use pretext::{BidiDirection, LayoutCursor, LayoutLineGlyphRun, PretextEngine, TextStyleSpec};
+use pretext::advanced::LayoutCursor;
+use pretext::{
+    BidiDirection, PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    PretextParagraphOptions as PrepareOptions, PretextStyle as TextStyleSpec,
+};
 use pretext_egui::{
-    paint_styled_positioned_text_runs, AssetRegistry, PretextFragmentPaintOptions,
-    StyledPositionedTextRunRef,
+    advanced::{paint_styled_positioned_text_runs, StyledPositionedTextRunRef},
+    EguiPretextPaintOptions, EguiPretextRenderer,
 };
 use pretext_render::{BaselineMode, TextRasterRequest, TextRenderCache};
 
@@ -276,7 +280,12 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         let window_frame = egui::Frame::window(ctx.style().as_ref())
             .fill(WINDOW_BG_TOP)
@@ -861,7 +870,7 @@ fn single_line_glyph_runs(
         return Vec::new();
     }
 
-    let prepared = engine.prepare_with_segments(text, style, &pretext::PrepareOptions::default());
+    let prepared = engine.prepare_paragraph(text, style, &PrepareOptions::default());
     let mut cursor = LayoutCursor::default();
     engine
         .layout_next_line_with_glyph_runs(&prepared, &mut cursor, 100_000.0)
@@ -1135,7 +1144,7 @@ fn paint_prop_panel(
     palette: &PaletteCache,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     paint_panel_box(painter, rect);
     let content_rect = panel_content_rect(rect);
@@ -1154,7 +1163,7 @@ fn paint_prop_panel(
                     text: &entry.text,
                     glyph_runs: &entry.glyph_runs,
                     emoji_overlays: &[],
-                    options: PretextFragmentPaintOptions::new(&variant.style, LINE_HEIGHT)
+                    options: EguiPretextPaintOptions::new(&variant.style, LINE_HEIGHT)
                         .color(prop_color(glyph.alpha_step))
                         .fallback_font(egui::FontId::new(
                             variant.style.size_px,
@@ -1177,7 +1186,7 @@ fn paint_mono_panel(
     palette: &PaletteCache,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     paint_panel_box(painter, rect);
     let content_rect = panel_content_rect(rect);
@@ -1196,7 +1205,7 @@ fn paint_mono_panel(
                     text: &entry.text,
                     glyph_runs: &entry.glyph_runs,
                     emoji_overlays: &[],
-                    options: PretextFragmentPaintOptions::new(&palette.mono_style, LINE_HEIGHT)
+                    options: EguiPretextPaintOptions::new(&palette.mono_style, LINE_HEIGHT)
                         .color(mono_color)
                         .fallback_font(egui::FontId::new(
                             palette.mono_style.size_px,
@@ -1281,7 +1290,10 @@ mod tests {
     }
 
     fn engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+        PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build()
     }
 
     fn particles_close(left: &[Particle], right: &[Particle]) {
@@ -1350,15 +1362,15 @@ mod tests {
     fn variable_ascii_render_uses_atlas_without_shaped_text_textures() {
         let ctx = egui::Context::default();
         let engine = engine();
-        let mut assets = AssetRegistry::default();
-        assets.install_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        pretext_egui::experimental::demo_assets::install_demo_fonts(&ctx);
         let mut demo = VariableTypographicAsciiDemo::default();
         demo.set_open(true);
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
-        let stats = assets.stats_snapshot();
+        let stats = assets.stats();
 
         assert!(stats.atlas_entries > 0);
         assert_eq!(stats.shaped_text_textures, 0);

@@ -6,12 +6,14 @@ use egui::{
     Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Stroke,
     StrokeKind,
 };
+use pretext::advanced::LayoutCursor;
 use pretext::{
-    LayoutCursor, LayoutLineGlyphRun, ParagraphDirection, PrepareOptions, PretextEngine,
-    TextStyleSpec, WhiteSpaceMode,
+    ParagraphDirection, PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    PretextParagraphOptions as PrepareOptions, PretextStyle as TextStyleSpec, WhiteSpaceMode,
 };
 use pretext_egui::{
-    paint_positioned_text_runs, AssetRegistry, PositionedTextRunRef, PretextFragmentPaintOptions,
+    advanced::{paint_positioned_text_runs, PositionedTextRunRef},
+    EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
 use crate::demos::DemoWindow;
@@ -327,7 +329,12 @@ impl DemoWindow for JustificationAlgorithmsDemo {
         self.open = open;
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .default_size(egui::vec2(1240.0, 1820.0))
@@ -350,7 +357,7 @@ impl JustificationAlgorithmsDemo {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         self.ensure_measurements(engine);
 
@@ -755,7 +762,7 @@ fn measure_glyph_runs_cached(
         return glyph_runs.clone();
     }
 
-    let prepared = engine.prepare_with_segments(text, style, &normal_options());
+    let prepared = engine.prepare_paragraph(text, style, &normal_options());
     let mut cursor = LayoutCursor::default();
     let glyph_runs = engine
         .layout_next_line_with_glyph_runs(&prepared, &mut cursor, f32::INFINITY)
@@ -1163,7 +1170,7 @@ fn show_column(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     column_width: f32,
     style: &TextStyleSpec,
     column: &ColumnState,
@@ -1217,7 +1224,7 @@ fn paint_column_canvas(
     column: &ColumnState,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     style: &TextStyleSpec,
 ) {
     painter.rect_filled(rect, CornerRadius::same(CANVAS_RADIUS), CANVAS_BG);
@@ -1258,7 +1265,7 @@ fn paint_line(
     natural_space: f32,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     style: &TextStyleSpec,
 ) {
     let should_justify =
@@ -1274,7 +1281,7 @@ fn paint_line(
     let use_justified_space = should_justify && raw_justified_space >= natural_space * 0.2;
     let justified_space = raw_justified_space.max(natural_space * 0.75);
     let river_color = river_highlight_color(justified_space, natural_space);
-    let options = PretextFragmentPaintOptions::new(style, LINE_HEIGHT)
+    let options = EguiPretextPaintOptions::new(style, LINE_HEIGHT)
         .color(INK)
         .fallback_font(FontId::new(style.size_px, egui::FontFamily::Proportional))
         .fallback_align(egui::Align2::LEFT_TOP);
@@ -1506,7 +1513,10 @@ mod tests {
     use super::*;
 
     fn bundled_engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+        PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build()
     }
 
     fn word(text: &str, width: f32) -> Segment {
@@ -1615,14 +1625,14 @@ mod tests {
     fn justification_render_uses_atlas_without_shaped_text_textures() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
+        let mut assets = EguiPretextRenderer::default();
         let mut demo = JustificationAlgorithmsDemo::default();
         demo.set_open(true);
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
-        let stats = assets.stats_snapshot();
+        let stats = assets.stats();
 
         assert!(stats.atlas_entries > 0);
         assert_eq!(stats.shaped_text_textures, 0);

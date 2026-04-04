@@ -6,12 +6,12 @@ use egui::{
 #[cfg(test)]
 use pretext::BidiDirection;
 use pretext::{
-    ParagraphDirection, PrepareOptions, PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
+    ParagraphDirection, PretextEngine, PretextParagraphLayout,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    WhiteSpaceMode,
 };
-use pretext_egui::{
-    paint_pretext_paragraph, AssetRegistry, BaselineMode, EmojiOverlayOptions,
-    PretextParagraphLayout, PretextParagraphPaintOptions,
-};
+use pretext_egui::{EguiPretextPaintOptions, EguiPretextRenderer};
 
 use crate::demos::DemoWindow;
 
@@ -36,9 +36,6 @@ const BUBBLE_PADDING_V: f32 = 8.0;
 const BUBBLE_CORNER: u8 = 16;
 const BUBBLE_TAIL: u8 = 4;
 const EMOJI_SIZE: f32 = 17.0;
-const SHAPED_TEXT_PAD_X: f32 = 2.0;
-const SHAPED_TEXT_PAD_Y: f32 = 2.0;
-const SHAPED_TEXT_BASELINE: f32 = 18.0;
 
 const PAGE_FILL: Color32 = Color32::from_rgb(244, 241, 234);
 const PAGE_GLOW: Color32 = Color32::from_rgba_premultiplied(255, 248, 241, 220);
@@ -134,7 +131,7 @@ impl BubblesDemo {
                 .iter()
                 .map(|message| PreparedBubble {
                     side: message.side,
-                    prepared: engine.prepare_with_segments(
+                    prepared: engine.prepare_paragraph(
                         message.text,
                         &bubble_text_style(),
                         &bubble_prepare_options(),
@@ -181,7 +178,7 @@ impl BubblesDemo {
         &mut self,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
@@ -203,7 +200,7 @@ impl BubblesDemo {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let outer_width = ui.available_width().max(320.0);
         let page_width = page_width_for_viewport(outer_width);
@@ -263,7 +260,12 @@ impl DemoWindow for BubblesDemo {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         self.show_window(ctx, engine, assets);
     }
 }
@@ -301,8 +303,8 @@ fn bubble_messages() -> &'static [BubbleMessage; 7] {
     ]
 }
 
-fn bubble_text_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn bubble_text_style() -> TextStyleSpec {
+    TextStyleSpec {
         families: vec![
             "Noto Sans".to_owned(),
             "Noto Sans Arabic".to_owned(),
@@ -434,27 +436,18 @@ fn build_bubble_visual(
     bubble: &PreparedBubble,
     wrap_width: f32,
 ) -> BubbleVisual {
-    let style = bubble_text_style();
-    let overlay_options = EmojiOverlayOptions {
-        style: &style,
-        slot_height: LINE_HEIGHT,
-        padding_x: SHAPED_TEXT_PAD_X,
-        padding_y: SHAPED_TEXT_PAD_Y,
-        slack_x: 2.0,
-        slack_y: 2.0,
-        baseline_mode: BaselineMode::FixedBaselinePx(SHAPED_TEXT_BASELINE),
-    };
-    let paragraph = PretextParagraphLayout::from_prepared(
-        engine,
-        &bubble.prepared,
-        wrap_width.max(1.0),
-        LINE_HEIGHT,
-        Some(overlay_options),
-    );
+    let paragraph = bubble
+        .prepared
+        .layout(engine, wrap_width.max(1.0), LINE_HEIGHT);
 
     BubbleVisual {
         side: bubble.side,
-        bubble_width: paragraph.width.ceil() + BUBBLE_PADDING_H * 2.0,
+        bubble_width: paragraph
+            .lines
+            .iter()
+            .fold(0.0f32, |max_width, line| max_width.max(line.line.width))
+            .ceil()
+            + BUBBLE_PADDING_H * 2.0,
         bubble_height: paragraph.height + BUBBLE_PADDING_V * 2.0,
         paragraph,
     }
@@ -574,7 +567,7 @@ fn paint_panels(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     render_state: &BubbleRenderState,
     page_width: f32,
 ) {
@@ -645,7 +638,7 @@ fn paint_bubbles_panel(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     title: &str,
     body: &str,
     wasted_pixels: &str,
@@ -694,7 +687,7 @@ fn paint_chat(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     chat_width: f32,
     bubbles: &[BubbleVisual],
 ) {
@@ -764,16 +757,16 @@ fn paint_message_text(
     bubble: &BubbleVisual,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     let style = bubble_text_style();
-    let options = PretextParagraphPaintOptions::new(&style, LINE_HEIGHT)
+    let options = EguiPretextPaintOptions::new(&style, LINE_HEIGHT)
         .color(CHAT_TEXT)
         .fallback_font(FontId::new(TEXT_SIZE, FontFamily::Proportional))
         .fallback_align(Align2::LEFT_TOP)
         .emoji_size(EMOJI_SIZE)
         .emoji_slot_height(LINE_HEIGHT);
-    paint_pretext_paragraph(
+    assets.paint_paragraph(
         painter,
         egui::pos2(
             bubble_rect.left() + BUBBLE_PADDING_H,
@@ -783,7 +776,6 @@ fn paint_message_text(
         &options,
         ctx,
         engine,
-        assets,
     );
 }
 
@@ -827,7 +819,10 @@ mod tests {
     use egui::{RawInput, TextureId};
 
     fn bundled_engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+        PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build()
     }
 
     fn shape_uses_user_texture(shape: &egui::Shape) -> bool {
@@ -840,7 +835,7 @@ mod tests {
     #[test]
     fn shrinkwrap_preserves_line_count_and_stays_within_fit_content_width() {
         let engine = bundled_engine();
-        let prepared = engine.prepare_with_segments(
+        let prepared = engine.prepare_paragraph(
             bubble_messages()[2].text,
             &bubble_text_style(),
             &bubble_prepare_options(),
@@ -860,7 +855,7 @@ mod tests {
             .iter()
             .map(|message| PreparedBubble {
                 side: message.side,
-                prepared: engine.prepare_with_segments(
+                prepared: engine.prepare_paragraph(
                     message.text,
                     &bubble_text_style(),
                     &bubble_prepare_options(),
@@ -896,8 +891,8 @@ mod tests {
     fn party_popper_message_emits_svg_emoji_shape() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
-        assets.install_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        pretext_egui::experimental::demo_assets::install_demo_fonts(&ctx);
         let mut demo = BubblesDemo {
             open: true,
             requested_chat_width: DEFAULT_CHAT_WIDTH,
@@ -918,13 +913,14 @@ mod tests {
         let output = ctx.run(raw_input(), |ctx| {
             demo.show_window(ctx, &engine, &mut assets);
         });
-        let stats = assets.stats_snapshot();
+        let stats = assets.stats();
 
         assert!(output
             .shapes
             .iter()
             .any(|clipped| shape_uses_user_texture(&clipped.shape)));
         assert!(stats.atlas_entries > 0);
+        assert!(stats.static_svg_textures > 0);
         assert_eq!(stats.shaped_text_textures, 0);
     }
 
@@ -935,7 +931,7 @@ mod tests {
             .iter()
             .map(|message| PreparedBubble {
                 side: message.side,
-                prepared: engine.prepare_with_segments(
+                prepared: engine.prepare_paragraph(
                     message.text,
                     &bubble_text_style(),
                     &bubble_prepare_options(),
@@ -944,7 +940,7 @@ mod tests {
             .collect::<Vec<_>>();
         let render = compute_bubble_render(&prepared, &engine, DEFAULT_CHAT_WIDTH);
         let bubble = &render.tight_bubbles[5];
-        let first_line_runs = &bubble.paragraph.lines[0].visual_runs;
+        let first_line_runs = &bubble.paragraph.lines[0].runs.visual_runs;
 
         assert_eq!(bubble.paragraph.lines[0].line.text, "كل شيء! Mixed bidi,");
         assert_eq!(first_line_runs.len(), 2);
@@ -958,12 +954,12 @@ mod tests {
     fn mixed_bidi_glyph_atlas_reuses_cached_entries() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
+        let mut assets = EguiPretextRenderer::default();
         let prepared = bubble_messages()
             .iter()
             .map(|message| PreparedBubble {
                 side: message.side,
-                prepared: engine.prepare_with_segments(
+                prepared: engine.prepare_paragraph(
                     message.text,
                     &bubble_text_style(),
                     &bubble_prepare_options(),
@@ -972,6 +968,7 @@ mod tests {
             .collect::<Vec<_>>();
         let render = compute_bubble_render(&prepared, &engine, DEFAULT_CHAT_WIDTH);
         let glyph_runs = render.tight_bubbles[5].paragraph.lines[0]
+            .runs
             .glyph_runs
             .clone();
 
@@ -980,7 +977,8 @@ mod tests {
                 egui::Order::Foreground,
                 egui::Id::new("bubbles-glyph-atlas-first"),
             ));
-            assert!(assets.paint_line_glyph_runs(
+            assert!(pretext_egui::advanced::paint_line_glyph_runs(
+                &mut assets,
                 &painter,
                 12.0,
                 12.0,
@@ -992,14 +990,15 @@ mod tests {
                 &engine,
             ));
         });
-        let after_first = assets.stats_snapshot();
+        let after_first = assets.stats();
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("bubbles-glyph-atlas-second"),
             ));
-            assert!(assets.paint_line_glyph_runs(
+            assert!(pretext_egui::advanced::paint_line_glyph_runs(
+                &mut assets,
                 &painter,
                 12.0,
                 12.0,
@@ -1011,7 +1010,7 @@ mod tests {
                 &engine,
             ));
         });
-        let after_second = assets.stats_snapshot();
+        let after_second = assets.stats();
 
         assert!(after_first.atlas_entries > 0);
         assert_eq!(after_first.atlas_entries, after_second.atlas_entries);

@@ -10,7 +10,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use pretext::{PrepareOptions, WhiteSpaceMode};
+use pretext::{ParagraphDirection, PretextParagraphOptions, WhiteSpaceMode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy)]
@@ -116,7 +116,7 @@ const CASES: &[GoldenCase] = &[
 ];
 
 #[test]
-fn layout_with_lines_matches_goldens() {
+fn layout_paragraph_matches_goldens() {
     let engine = support::bundled_engine();
     let style = support::default_style();
     let update = env::var_os("UPDATE_GOLDENS").is_some();
@@ -124,15 +124,15 @@ fn layout_with_lines_matches_goldens() {
     let _ = fs::create_dir_all(&fixtures_dir);
 
     for case in CASES {
-        let prepared = engine.prepare_with_segments(
+        let prepared = engine.prepare_paragraph(
             case.text,
             &style,
-            &PrepareOptions {
+            &PretextParagraphOptions {
                 white_space: case.white_space,
-                paragraph_direction: pretext::ParagraphDirection::Auto,
+                paragraph_direction: ParagraphDirection::Auto,
             },
         );
-        let result = engine.layout_with_lines(&prepared, case.width, case.line_height);
+        let result = engine.layout_paragraph(&prepared, case.width, case.line_height);
         let actual = GoldenLayout {
             height: round3(result.height),
             line_count: result.line_count,
@@ -140,8 +140,8 @@ fn layout_with_lines_matches_goldens() {
                 .lines
                 .into_iter()
                 .map(|line| GoldenLine {
-                    text: line.text,
-                    width: round3(line.width),
+                    text: line.line.text,
+                    width: round3(line.line.width),
                 })
                 .collect(),
         };

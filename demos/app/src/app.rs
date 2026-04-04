@@ -3,15 +3,20 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use pretext::{
-    EngineRuntimeStats, ParagraphDirection, PrepareOptions, PretextEngine, WhiteSpaceMode,
+    EngineRuntimeStats, ParagraphDirection, PretextEngine, PretextParagraphOptions, PretextStyle,
+    WhiteSpaceMode,
 };
-use pretext_egui::{AssetRegistry, AssetRegistryStats, AtlasWarmupBucket};
+use pretext_egui::{
+    advanced::{enqueue_atlas_warmup, tick_atlas_warmup, AtlasWarmupBucket},
+    experimental::demo_assets::{bundled_font_data, install_demo_fonts},
+    EguiPretextRenderer, EguiPretextRendererStats,
+};
 
 use crate::demos::{self, DemoPerfStats, DemoWindow};
 
 pub struct PretextDemoApp {
     engine: PretextEngine,
-    assets: AssetRegistry,
+    assets: EguiPretextRenderer,
     demos: Vec<Box<dyn DemoWindow>>,
     sample_line_count: usize,
     root_viewport_activation_pending: bool,
@@ -51,7 +56,7 @@ struct PerfHudState {
     frame_time_ms_ema: f32,
     last_engine_totals: EngineRuntimeStats,
     last_engine_frame: EngineRuntimeStats,
-    last_asset_totals: AssetRegistryStats,
+    last_asset_totals: EguiPretextRendererStats,
     last_asset_frame: AssetRegistryFrameStats,
     last_demo_frame: DemoPerfStats,
 }
@@ -59,12 +64,12 @@ struct PerfHudState {
 impl PretextDemoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let now = Instant::now();
-        let mut assets = AssetRegistry::default();
-        assets.install_fonts(&cc.egui_ctx);
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let assets = EguiPretextRenderer::default();
+        install_demo_fonts(&cc.egui_ctx);
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         prime_startup_fonts(&engine, false);
         let sample_line_count = compute_sample_line_count(&engine);
         Self {
@@ -83,14 +88,14 @@ impl PretextDemoApp {
 
     pub fn new_headless() -> Self {
         let now = Instant::now();
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            false,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(false)
+            .build();
         let sample_line_count = compute_sample_line_count(&engine);
         Self {
             engine,
-            assets: AssetRegistry::default(),
+            assets: EguiPretextRenderer::default(),
             demos: demos::default_demos(),
             sample_line_count,
             root_viewport_activation_pending: false,
@@ -162,7 +167,7 @@ impl PretextDemoApp {
         self.perf_hud.record_frame(
             frame_start.elapsed().as_secs_f32() * 1000.0,
             self.engine.runtime_stats(),
-            self.assets.stats_snapshot(),
+            self.assets.stats(),
             demo_perf,
         );
         if self.perf_hud_visible {
@@ -235,7 +240,8 @@ impl PretextDemoApp {
         }
 
         schedule_default_atlas_warmup(&mut self.assets, &self.engine, ctx);
-        let _ = self.assets.tick_atlas_warmup(
+        let _ = tick_atlas_warmup(
+            &mut self.assets,
             ctx,
             &self.engine,
             ATLAS_WARMUP_GLYPH_BUDGET,
@@ -334,7 +340,7 @@ impl PerfHudState {
         &mut self,
         frame_ms: f32,
         engine_totals: EngineRuntimeStats,
-        asset_totals: AssetRegistryStats,
+        asset_totals: EguiPretextRendererStats,
         demo_frame: DemoPerfStats,
     ) {
         self.frame_time_ms_ema = if self.frame_time_ms_ema <= 0.0 {
@@ -415,8 +421,8 @@ fn diff_engine_stats(
 }
 
 fn diff_asset_stats(
-    current: AssetRegistryStats,
-    previous: AssetRegistryStats,
+    current: EguiPretextRendererStats,
+    previous: EguiPretextRendererStats,
 ) -> AssetRegistryFrameStats {
     AssetRegistryFrameStats {
         texture_cache_hits: current
@@ -490,19 +496,19 @@ const CJK_WARMUP: &str = "中文标签与段落布局";
 const MYANMAR_WARMUP: &str = "မြန်မာစာ စာပိုဒ်";
 
 fn compute_sample_line_count(engine: &PretextEngine) -> usize {
-    let prepared = engine.prepare(SAMPLE_TEXT, &default_style(), &default_options());
-    engine
-        .layout(&prepared, SAMPLE_WIDTH, SAMPLE_LINE_HEIGHT)
+    let prepared = engine.prepare_paragraph(SAMPLE_TEXT, &default_style(), &default_options());
+    prepared
+        .measure(engine, SAMPLE_WIDTH, SAMPLE_LINE_HEIGHT)
         .line_count
 }
 
 fn spawn_system_font_engine() -> Receiver<PretextEngine> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let engine = PretextEngine::with_font_data_and_system_fonts(
-            AssetRegistry::bundled_font_data(),
-            true,
-        );
+        let engine = PretextEngine::builder()
+            .with_font_data(bundled_font_data())
+            .include_system_fonts(true)
+            .build();
         prime_startup_fonts(&engine, true);
         let _ = tx.send(engine);
     });
@@ -510,11 +516,12 @@ fn spawn_system_font_engine() -> Receiver<PretextEngine> {
 }
 
 fn schedule_default_atlas_warmup(
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
     engine: &PretextEngine,
     ctx: &egui::Context,
 ) {
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::CommonSans,
         &default_style(),
         &[
@@ -526,7 +533,8 @@ fn schedule_default_atlas_warmup(
         engine,
         ctx,
     );
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::CommonSerif,
         &warmup_editorial_body_style(),
         &[
@@ -537,35 +545,40 @@ fn schedule_default_atlas_warmup(
         engine,
         ctx,
     );
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::SerifDisplay,
         &warmup_editorial_headline_style(),
         &[EDITORIAL_HEADLINE_WARMUP],
         engine,
         ctx,
     );
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::Mono,
         &bundled_mono_style(),
         &[ASCII_VISIBLE_WARMUP, "i1{} -> mono warmup"],
         engine,
         ctx,
     );
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::Arabic,
         &bundled_arabic_style(),
         &["بدأت الرحلة بالعربية 123 ✅", BUBBLES_WARMUP],
         engine,
         ctx,
     );
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::Cjk,
         &bundled_cjk_style(),
         &[CJK_WARMUP],
         engine,
         ctx,
     );
-    assets.enqueue_atlas_warmup(
+    enqueue_atlas_warmup(
+        assets,
         AtlasWarmupBucket::Myanmar,
         &bundled_myanmar_style(),
         &[MYANMAR_WARMUP],
@@ -594,8 +607,8 @@ fn prime_startup_fonts(engine: &PretextEngine, include_system_primes: bool) {
     }
 }
 
-fn default_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn default_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Sans".to_owned(),
             "Noto Sans Arabic".to_owned(),
@@ -608,15 +621,15 @@ fn default_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn default_options() -> PrepareOptions {
-    PrepareOptions {
+fn default_options() -> PretextParagraphOptions {
+    PretextParagraphOptions {
         white_space: WhiteSpaceMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
     }
 }
 
-fn bundled_arabic_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn bundled_arabic_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Sans Arabic".to_owned(),
             "Noto Sans".to_owned(),
@@ -629,8 +642,8 @@ fn bundled_arabic_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn bundled_cjk_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn bundled_cjk_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Sans CJK".to_owned(),
             "Noto Sans".to_owned(),
@@ -643,8 +656,8 @@ fn bundled_cjk_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn bundled_myanmar_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn bundled_myanmar_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Sans Myanmar".to_owned(),
             "Noto Sans".to_owned(),
@@ -657,8 +670,8 @@ fn bundled_myanmar_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn bundled_mono_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn bundled_mono_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Sans Mono".to_owned(),
             "Menlo".to_owned(),
@@ -670,8 +683,8 @@ fn bundled_mono_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn bundled_emoji_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn bundled_emoji_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Color Emoji".to_owned(),
             "Noto Emoji".to_owned(),
@@ -683,8 +696,8 @@ fn bundled_emoji_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn warmup_editorial_body_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn warmup_editorial_body_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Serif".to_owned(),
             "Georgia".to_owned(),
@@ -697,8 +710,8 @@ fn warmup_editorial_body_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn warmup_editorial_headline_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn warmup_editorial_headline_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Serif".to_owned(),
             "Georgia".to_owned(),
@@ -711,8 +724,8 @@ fn warmup_editorial_headline_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn system_sans_prime_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn system_sans_prime_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Helvetica".to_owned(),
             "Arial".to_owned(),
@@ -724,8 +737,8 @@ fn system_sans_prime_style() -> pretext::TextStyleSpec {
     }
 }
 
-fn system_mono_prime_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn system_mono_prime_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Menlo".to_owned(),
             "Monaco".to_owned(),

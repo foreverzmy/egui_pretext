@@ -3,7 +3,9 @@ use egui::epaint::Mesh;
 use egui::{Color32, ColorImage, Context, Painter, Rect, Shape, TextureHandle, TextureOptions};
 use image::ImageFormat;
 use pretext::font_catalog::FontId;
-use pretext::{LayoutLineGlyphRun, PretextEngine, TextStyleSpec};
+use pretext::{
+    PretextEngine, PretextGlyphRun as LayoutLineGlyphRun, PretextStyle as TextStyleSpec,
+};
 use resvg::usvg;
 
 const ATLAS_PAGE_SIZE: usize = 2048;

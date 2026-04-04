@@ -5,10 +5,14 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Label, Layout, Rect, RichText, Sense,
     Shape, Stroke, TextWrapMode, UiBuilder,
 };
-use pretext::{PrepareOptions, PreparedTextWithSegments, PretextEngine, WhiteSpaceMode};
+use pretext::{
+    BidiDirection, PretextEngine, PretextParagraphLayout,
+    PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    WhiteSpaceMode,
+};
 use pretext_egui::{
-    paint_pretext_paragraph, AssetRegistry, BaselineMode, EmojiOverlayOptions,
-    PretextParagraphLayout, PretextParagraphPaintOptions, ShapedTextRasterRequest,
+    BaselineMode, EguiPretextPaintOptions, EguiPretextRenderer, PretextTextureRasterRequest,
 };
 
 use crate::demos::DemoWindow;
@@ -86,7 +90,7 @@ impl AccordionDemo {
             let prepared = accordion_sections()
                 .iter()
                 .map(|section| {
-                    engine.prepare_with_segments(
+                    engine.prepare_paragraph(
                         section.text,
                         &accordion_body_style(),
                         &normal_options(),
@@ -136,7 +140,7 @@ impl AccordionDemo {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let outer_width = ui.available_width().max(320.0);
         let page_gutter = if outer_width <= 640.0 { 20.0 } else { 32.0 };
@@ -173,7 +177,7 @@ impl AccordionDemo {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let sections = accordion_sections();
         let stack_width = ui.available_width().max(240.0);
@@ -302,7 +306,12 @@ impl DemoWindow for AccordionDemo {
         }
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, _assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+    ) {
         self.show_with_assets(ctx, engine, _assets);
     }
 }
@@ -312,7 +321,7 @@ impl AccordionDemo {
         &mut self,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let mut open = self.open;
         egui::Window::new(self.title())
@@ -388,23 +397,7 @@ fn measure_section(
     prepared: &PreparedTextWithSegments,
     text_width: f32,
 ) -> SectionMetrics {
-    let style = accordion_body_style();
-    let overlay_options = EmojiOverlayOptions {
-        style: &style,
-        slot_height: BODY_LINE_HEIGHT,
-        padding_x: BODY_SHAPED_TEXT_PAD_X,
-        padding_y: BODY_SHAPED_TEXT_PAD_Y,
-        slack_x: 2.0,
-        slack_y: 2.0,
-        baseline_mode: BaselineMode::AutoFontMetrics,
-    };
-    let paragraph = PretextParagraphLayout::from_prepared(
-        engine,
-        prepared,
-        text_width,
-        BODY_LINE_HEIGHT,
-        Some(overlay_options),
-    );
+    let paragraph = prepared.layout(engine, text_width, BODY_LINE_HEIGHT);
     let meta = section_meta(paragraph.line_count, paragraph.height);
     let body_height = expanded_body_height(paragraph.height);
     SectionMetrics {
@@ -422,8 +415,8 @@ fn section_meta(line_count: usize, height: f32) -> String {
     )
 }
 
-fn accordion_body_style() -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn accordion_body_style() -> TextStyleSpec {
+    TextStyleSpec {
         families: vec![
             "Noto Sans".to_owned(),
             "Noto Sans Arabic".to_owned(),
@@ -560,41 +553,38 @@ fn paint_section_body(
     line_height: f32,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     let style = accordion_body_style();
-    let options = PretextParagraphPaintOptions::new(&style, line_height)
+    let options = EguiPretextPaintOptions::new(&style, line_height)
         .color(INK)
         .fallback_font(FontId::new(BODY_TEXT_SIZE, FontFamily::Proportional))
         .fallback_align(Align2::LEFT_TOP)
         .emoji_size(BODY_EMOJI_SIZE)
         .emoji_slot_height(line_height - 2.0);
-    paint_pretext_paragraph(
+    assets.paint_paragraph(
         painter,
         egui::pos2(body_rect.left() + BODY_PADDING_X, body_rect.top()),
         paragraph,
         &options,
         ctx,
         engine,
-        assets,
     );
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn accordion_shaped_text_request<'a>(
     text: &'a str,
-    style: &'a pretext::TextStyleSpec,
-    direction: pretext::BidiDirection,
-    color: Color32,
-    fragment_width: f32,
+    style: &'a TextStyleSpec,
+    direction: BidiDirection,
+    _color: Color32,
+    _fragment_width: f32,
     baseline_mode: BaselineMode,
-) -> ShapedTextRasterRequest<'a> {
-    ShapedTextRasterRequest {
+) -> PretextTextureRasterRequest<'a> {
+    PretextTextureRasterRequest {
         text,
         style,
         direction,
-        color,
-        fragment_width,
         slot_height: BODY_LINE_HEIGHT,
         padding_x: BODY_SHAPED_TEXT_PAD_X,
         padding_y: BODY_SHAPED_TEXT_PAD_Y,
@@ -625,7 +615,10 @@ mod tests {
     use egui::{RawInput, TextureId};
 
     fn bundled_engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+        PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build()
     }
 
     fn shape_uses_user_texture(shape: &egui::Shape) -> bool {
@@ -661,16 +654,10 @@ mod tests {
         let engine = bundled_engine();
         let width = 320.0;
         let body = accordion_sections()[2].text;
-        let expected = engine.layout(
-            &engine.prepare(body, &accordion_body_style(), &normal_options()),
-            body_text_width(width),
-            BODY_LINE_HEIGHT,
-        );
-        let actual = engine.layout_with_lines(
-            &engine.prepare_with_segments(body, &accordion_body_style(), &normal_options()),
-            body_text_width(width),
-            BODY_LINE_HEIGHT,
-        );
+        let prepared = engine.prepare_paragraph(body, &accordion_body_style(), &normal_options());
+        let expected =
+            engine.measure_paragraph(&prepared, body_text_width(width), BODY_LINE_HEIGHT);
+        let actual = engine.layout_paragraph(&prepared, body_text_width(width), BODY_LINE_HEIGHT);
 
         assert!((actual.height - expected.height).abs() < 0.001);
         assert_eq!(
@@ -682,8 +669,8 @@ mod tests {
     #[test]
     fn measurement_meta_uses_engine_line_count_and_rounded_height() {
         let engine = bundled_engine();
-        let layout = engine.layout_with_lines(
-            &engine.prepare_with_segments(
+        let layout = engine.layout_paragraph(
+            &engine.prepare_paragraph(
                 accordion_sections()[1].text,
                 &accordion_body_style(),
                 &normal_options(),
@@ -705,16 +692,16 @@ mod tests {
     #[test]
     fn mixed_section_layout_keeps_arabic_and_emoji_text() {
         let engine = bundled_engine();
-        let prepared = engine.prepare_with_segments(
+        let prepared = engine.prepare_paragraph(
             accordion_sections()[3].text,
             &accordion_body_style(),
             &normal_options(),
         );
-        let layout = engine.layout_with_lines(&prepared, body_text_width(360.0), BODY_LINE_HEIGHT);
+        let layout = engine.layout_paragraph(&prepared, body_text_width(360.0), BODY_LINE_HEIGHT);
         let joined = layout
             .lines
             .iter()
-            .map(|line| line.text.as_str())
+            .map(|line| line.line.text.as_str())
             .collect::<String>();
 
         assert!(joined.contains("بدأت الرحلة"));
@@ -725,8 +712,8 @@ mod tests {
     fn mixed_section_emits_svg_emoji_shape_when_open() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
-        assets.install_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        pretext_egui::experimental::demo_assets::install_demo_fonts(&ctx);
 
         let mut demo = AccordionDemo {
             open: true,
@@ -749,19 +736,21 @@ mod tests {
         let output = ctx.run(raw_input(1.0), |ctx| {
             demo.show_with_assets(ctx, &engine, &mut assets);
         });
+        let stats = assets.stats();
 
         assert!(output
             .shapes
             .iter()
             .any(|clipped| shape_uses_user_texture(&clipped.shape)));
+        assert!(stats.static_svg_textures > 0);
     }
 
     #[test]
     fn mixed_section_arabic_texture_uses_ink_tint_on_light_panel() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
-        assets.install_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        pretext_egui::experimental::demo_assets::install_demo_fonts(&ctx);
 
         let mut demo = AccordionDemo {
             open: true,
@@ -795,13 +784,13 @@ mod tests {
     fn mixed_section_arabic_run_shaped_texture_reuses_cached_handle() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
-        let prepared = engine.prepare_with_segments(
+        let mut assets = EguiPretextRenderer::default();
+        let prepared = engine.prepare_paragraph(
             accordion_sections()[3].text,
             &accordion_body_style(),
             &normal_options(),
         );
-        let layout = engine.layout_with_runs(&prepared, body_text_width(360.0), BODY_LINE_HEIGHT);
+        let layout = engine.layout_paragraph(&prepared, body_text_width(360.0), BODY_LINE_HEIGHT);
 
         let run = layout
             .lines
@@ -820,12 +809,12 @@ mod tests {
             BaselineMode::AutoFontMetrics,
         );
         let first = assets
-            .shaped_text_texture(&engine, request, &ctx)
+            .rasterize_text_texture(&engine, request, &ctx)
             .expect("texture exists");
         let second = assets
-            .shaped_text_texture(&engine, request, &ctx)
+            .rasterize_text_texture(&engine, request, &ctx)
             .expect("cached texture exists");
-        let stats = assets.stats_snapshot();
+        let stats = assets.stats();
 
         assert_eq!(first.handle.id(), second.handle.id());
         assert_eq!(first.logical_size, second.logical_size);

@@ -6,10 +6,13 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{Color32, CornerRadius, Rect, Sense};
 use pretext::{
-    LayoutLineWithRuns, PrepareOptions, PreparedTextWithSegments, PretextEngine, WhiteSpaceMode,
+    PretextEngine, PretextLine as LayoutLineWithRuns, PretextParagraphOptions as PrepareOptions,
+    PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
+    WhiteSpaceMode,
 };
 use pretext_egui::{
-    paint_positioned_text_runs, AssetRegistry, PositionedTextRunRef, PretextFragmentPaintOptions,
+    advanced::{paint_positioned_text_runs, PositionedTextRunRef},
+    EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
 use crate::demos::DemoWindow;
@@ -134,7 +137,12 @@ impl DemoWindow for MasonryDemo {
         self.open = open;
     }
 
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry) {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    ) {
         let mut open = self.open;
         egui::Window::new(self.title())
             .open(&mut open)
@@ -337,7 +345,7 @@ impl MasonryDemo {
                 .get_mut(next_card_index)
                 .expect("next card should exist while layout is incomplete");
             if card.prepared.is_none() {
-                card.prepared = Some(engine.prepare_with_segments(
+                card.prepared = Some(engine.prepare_paragraph(
                     card.text.as_ref(),
                     masonry_text_style(),
                     &normal_options(),
@@ -363,7 +371,7 @@ impl MasonryDemo {
         text_width: f32,
         ctx: &egui::Context,
         engine: &PretextEngine,
-        assets: &mut AssetRegistry,
+        assets: &mut EguiPretextRenderer,
     ) {
         let render_key = masonry_render_memo_key(text_width);
         let cards_state = self
@@ -383,7 +391,7 @@ impl MasonryDemo {
                 .prepared
                 .as_ref()
                 .expect("visible masonry cards should already be prepared");
-            let layout = engine.layout_with_runs(prepared, text_width.max(1.0), LINE_HEIGHT);
+            let layout = engine.layout_paragraph(prepared, text_width.max(1.0), LINE_HEIGHT);
             card.rendered = Some(MasonryRenderedCard {
                 memo_key: render_key,
                 lines: layout.lines,
@@ -477,13 +485,8 @@ impl MasonryPlacementBuilder {
     }
 }
 
-fn build_text_style(
-    families: &[&str],
-    size_px: f32,
-    weight: u16,
-    italic: bool,
-) -> pretext::TextStyleSpec {
-    pretext::TextStyleSpec {
+fn build_text_style(families: &[&str], size_px: f32, weight: u16, italic: bool) -> TextStyleSpec {
+    TextStyleSpec {
         families: families.iter().map(|name| (*name).to_owned()).collect(),
         size_px,
         weight,
@@ -491,8 +494,8 @@ fn build_text_style(
     }
 }
 
-fn masonry_text_style() -> &'static pretext::TextStyleSpec {
-    static STYLE: OnceLock<pretext::TextStyleSpec> = OnceLock::new();
+fn masonry_text_style() -> &'static TextStyleSpec {
+    static STYLE: OnceLock<TextStyleSpec> = OnceLock::new();
     STYLE.get_or_init(|| {
         build_text_style(
             &[
@@ -557,8 +560,8 @@ fn compute_card_height(
     prepared: &PreparedTextWithSegments,
     text_width: f32,
 ) -> f32 {
-    engine
-        .layout(prepared.as_prepared(), text_width.max(1.0), LINE_HEIGHT)
+    prepared
+        .measure(engine, text_width.max(1.0), LINE_HEIGHT)
         .height
         + CARD_PADDING_Y * 2.0
 }
@@ -611,14 +614,14 @@ fn paint_masonry_card(
     rendered: &MasonryRenderedCard,
     ctx: &egui::Context,
     engine: &PretextEngine,
-    assets: &mut AssetRegistry,
+    assets: &mut EguiPretextRenderer,
 ) {
     painter.add(CARD_SHADOW.as_shape(rect, CornerRadius::same(CARD_RADIUS)));
     painter.rect_filled(rect, CornerRadius::same(CARD_RADIUS), CARD_FILL);
 
     let x = rect.left() + CARD_PADDING_X;
     let style = masonry_text_style();
-    let options = PretextFragmentPaintOptions::new(style, LINE_HEIGHT)
+    let options = EguiPretextPaintOptions::new(style, LINE_HEIGHT)
         .color(INK)
         .fallback_font(egui::FontId::new(
             style.size_px,
@@ -650,7 +653,10 @@ mod tests {
     use super::*;
 
     fn bundled_engine() -> PretextEngine {
-        PretextEngine::with_font_data_and_system_fonts(AssetRegistry::bundled_font_data(), false)
+        PretextEngine::builder()
+            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .include_system_fonts(false)
+            .build()
     }
 
     fn demo_with_texts(engine: &PretextEngine, texts: &[&str]) -> MasonryDemo {
@@ -718,7 +724,7 @@ mod tests {
             .iter()
             .map(|text| {
                 let prepared =
-                    engine.prepare_with_segments(text, masonry_text_style(), &normal_options());
+                    engine.prepare_paragraph(text, masonry_text_style(), &normal_options());
                 compute_card_height(&engine, &prepared, columns.text_width)
             })
             .collect::<Vec<_>>();
@@ -779,7 +785,7 @@ mod tests {
     fn masonry_show_first_frame_only_materializes_visible_cards() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
+        let mut assets = EguiPretextRenderer::default();
         let mut demo = MasonryDemo::default();
         demo.set_open(true);
 
@@ -798,7 +804,7 @@ mod tests {
     fn masonry_second_frame_reuses_rendered_visible_cards() {
         let ctx = egui::Context::default();
         let engine = bundled_engine();
-        let mut assets = AssetRegistry::default();
+        let mut assets = EguiPretextRenderer::default();
         let mut demo = MasonryDemo::default();
         demo.set_open(true);
 
@@ -806,13 +812,13 @@ mod tests {
             demo.show(ctx, &engine, &mut assets);
         });
         let after_first = engine.runtime_stats();
-        let asset_after_first = assets.stats_snapshot();
+        let asset_after_first = assets.stats();
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let after_second = engine.runtime_stats();
-        let asset_after_second = assets.stats_snapshot();
+        let asset_after_second = assets.stats();
 
         assert_eq!(
             after_second.layout_with_runs_calls,

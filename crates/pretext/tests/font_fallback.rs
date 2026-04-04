@@ -1,6 +1,6 @@
 mod support;
 
-use pretext::{font_catalog::FontCatalog, TextStyleSpec};
+use pretext::{font_catalog::FontCatalog, PretextStyle};
 
 #[test]
 fn face_for_cluster_requires_full_coverage() {
@@ -48,7 +48,7 @@ fn bundled_fonts_measure_arabic_and_rocket_emoji() {
 #[test]
 fn font_for_char_still_prefers_requested_family_over_global_coverage_map() {
     let catalog = FontCatalog::with_font_data_and_system_fonts(support::bundled_font_data(), false);
-    let style = TextStyleSpec {
+    let style = PretextStyle {
         families: vec!["Noto Sans Mono".to_owned(), "Noto Sans".to_owned()],
         ..support::default_style()
     };

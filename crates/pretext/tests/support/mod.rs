@@ -1,7 +1,10 @@
-use pretext::{PretextEngine, TextStyleSpec};
+use pretext::{PretextEngine, PretextStyle};
 
 pub fn bundled_engine() -> PretextEngine {
-    PretextEngine::with_font_data_and_system_fonts(bundled_font_data(), false)
+    PretextEngine::builder()
+        .with_font_data(bundled_font_data())
+        .include_system_fonts(false)
+        .build()
 }
 
 pub fn bundled_font_data() -> Vec<Vec<u8>> {
@@ -15,8 +18,8 @@ pub fn bundled_font_data() -> Vec<Vec<u8>> {
     ]
 }
 
-pub fn default_style() -> TextStyleSpec {
-    TextStyleSpec {
+pub fn default_style() -> PretextStyle {
+    PretextStyle {
         families: vec![
             "Noto Sans".to_owned(),
             "Noto Sans Arabic".to_owned(),

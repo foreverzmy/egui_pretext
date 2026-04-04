@@ -11,7 +11,7 @@ pub mod variable_typographic_ascii;
 
 use eframe::egui;
 use pretext::PretextEngine;
-use pretext_egui::AssetRegistry;
+use pretext_egui::EguiPretextRenderer;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DemoPerfStats {
@@ -27,7 +27,12 @@ pub trait DemoWindow {
     fn title(&self) -> &str;
     fn is_open(&self) -> bool;
     fn set_open(&mut self, open: bool);
-    fn show(&mut self, ctx: &egui::Context, engine: &PretextEngine, assets: &mut AssetRegistry);
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        assets: &mut EguiPretextRenderer,
+    );
     fn perf_stats(&self) -> DemoPerfStats {
         DemoPerfStats::default()
     }

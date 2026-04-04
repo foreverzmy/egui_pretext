@@ -1,6 +1,6 @@
 mod support;
 
-use pretext::{PrepareOptions, TextStyleSpec, WhiteSpaceMode};
+use pretext::{ParagraphDirection, PretextParagraphOptions, PretextStyle, WhiteSpaceMode};
 
 #[test]
 fn paragraph_cache_is_enabled() {
@@ -12,42 +12,42 @@ fn paragraph_cache_is_enabled() {
 fn paragraph_cache_separates_styles() {
     let engine = support::bundled_engine();
     let small = support::default_style();
-    let large = TextStyleSpec {
+    let large = PretextStyle {
         size_px: 28.0,
         ..support::default_style()
     };
     let text = "The same paragraph should not reuse cached lines across text styles.";
 
-    let prepared_small = engine.prepare_with_segments(
+    let prepared_small = engine.prepare_paragraph(
         text,
         &small,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
-    let prepared_large = engine.prepare_with_segments(
+    let prepared_large = engine.prepare_paragraph(
         text,
         &large,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
 
-    let small_layout = engine.layout_with_lines(&prepared_small, 190.0, 22.0);
-    let large_layout = engine.layout_with_lines(&prepared_large, 190.0, 34.0);
+    let small_layout = engine.layout_paragraph(&prepared_small, 190.0, 22.0);
+    let large_layout = engine.layout_paragraph(&prepared_large, 190.0, 34.0);
 
     let fresh_engine = support::bundled_engine();
-    let fresh_prepared_large = fresh_engine.prepare_with_segments(
+    let fresh_prepared_large = fresh_engine.prepare_paragraph(
         text,
         &large,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
-    let fresh_large_layout = fresh_engine.layout_with_lines(&fresh_prepared_large, 190.0, 34.0);
+    let fresh_large_layout = fresh_engine.layout_paragraph(&fresh_prepared_large, 190.0, 34.0);
 
     assert_ne!(small_layout.lines, large_layout.lines);
     assert_eq!(large_layout.lines, fresh_large_layout.lines);
@@ -59,25 +59,25 @@ fn paragraph_cache_separates_whitespace_modes() {
     let text = "alpha\nbeta";
     let style = support::default_style();
 
-    let normal = engine.prepare_with_segments(
+    let normal = engine.prepare_paragraph(
         text,
         &style,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
-    let pre_wrap = engine.prepare_with_segments(
+    let pre_wrap = engine.prepare_paragraph(
         text,
         &style,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::PreWrap,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
 
-    let normal_layout = engine.layout_with_lines(&normal, 400.0, 20.0);
-    let pre_wrap_layout = engine.layout_with_lines(&pre_wrap, 400.0, 20.0);
+    let normal_layout = engine.layout_paragraph(&normal, 400.0, 20.0);
+    let pre_wrap_layout = engine.layout_paragraph(&pre_wrap, 400.0, 20.0);
 
     assert_eq!(normal_layout.line_count, 1);
     assert_eq!(pre_wrap_layout.line_count, 2);
@@ -89,34 +89,37 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
     let engine = support::bundled_engine();
     let narrow = engine.prepare_atomic_placeholder(
         36.0,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
     let wide = engine.prepare_atomic_placeholder(
         84.0,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
 
-    let narrow_layout = engine.layout_with_lines(&narrow, 24.0, 20.0);
-    let wide_layout = engine.layout_with_lines(&wide, 24.0, 20.0);
+    let narrow_layout = engine.layout_paragraph(&narrow, 24.0, 20.0);
+    let wide_layout = engine.layout_paragraph(&wide, 24.0, 20.0);
 
     let fresh_engine = support::bundled_engine();
     let fresh_wide = fresh_engine.prepare_atomic_placeholder(
         84.0,
-        &PrepareOptions {
+        &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
-            paragraph_direction: pretext::ParagraphDirection::Auto,
+            paragraph_direction: ParagraphDirection::Auto,
         },
     );
-    let fresh_wide_layout = fresh_engine.layout_with_lines(&fresh_wide, 24.0, 20.0);
+    let fresh_wide_layout = fresh_engine.layout_paragraph(&fresh_wide, 24.0, 20.0);
 
     assert_eq!(narrow_layout.line_count, 1);
     assert_eq!(wide_layout.line_count, 1);
-    assert_ne!(narrow_layout.lines[0].width, wide_layout.lines[0].width);
+    assert_ne!(
+        narrow_layout.lines[0].line.width,
+        wide_layout.lines[0].line.width
+    );
     assert_eq!(wide_layout, fresh_wide_layout);
 }
