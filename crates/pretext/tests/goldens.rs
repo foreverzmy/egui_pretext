@@ -130,6 +130,7 @@ fn layout_paragraph_matches_goldens() {
             &PretextParagraphOptions {
                 white_space: case.white_space,
                 paragraph_direction: ParagraphDirection::Auto,
+                ..PretextParagraphOptions::default()
             },
         );
         let result = engine.layout_paragraph(&prepared, case.width, case.line_height);

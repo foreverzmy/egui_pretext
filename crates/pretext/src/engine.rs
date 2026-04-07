@@ -7,7 +7,7 @@ use std::sync::Arc;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 
-use crate::analysis::{GraphemeKind, WhiteSpaceMode};
+use crate::analysis::{GraphemeKind, WhiteSpaceMode, WordBreakMode};
 use crate::bidi::{BidiDirection, BidiRun, ParagraphDirection};
 use crate::font_catalog::{FontCatalog, FontId, LoadedFace};
 use crate::layout::{self, ParagraphCache};
@@ -54,6 +54,7 @@ impl Hash for TextStyleSpec {
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareOptions {
     pub white_space: WhiteSpaceMode,
+    pub word_break: WordBreakMode,
     pub paragraph_direction: ParagraphDirection,
 }
 
@@ -61,6 +62,7 @@ impl Default for PrepareOptions {
     fn default() -> Self {
         Self {
             white_space: WhiteSpaceMode::Normal,
+            word_break: WordBreakMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
         }
     }
@@ -219,6 +221,7 @@ pub(crate) struct PreparedCore {
     pub style_hash: u64,
     pub locale_hash: u64,
     pub white_space: WhiteSpaceMode,
+    pub word_break: WordBreakMode,
     pub paragraph_direction: ParagraphDirection,
 }
 
@@ -282,6 +285,7 @@ struct PrepareCacheKey {
     style: TextStyleCacheKey,
     locale: Option<String>,
     white_space: WhiteSpaceMode,
+    word_break: WordBreakMode,
     paragraph_direction: ParagraphDirection,
 }
 
@@ -298,6 +302,7 @@ struct AtomicPlaceholderCacheKey {
     width_bits: u32,
     locale: Option<String>,
     white_space: WhiteSpaceMode,
+    word_break: WordBreakMode,
     paragraph_direction: ParagraphDirection,
 }
 
@@ -312,6 +317,7 @@ impl PreparedText {
         style_hash: u64,
         locale_hash: u64,
         white_space: WhiteSpaceMode,
+        word_break: WordBreakMode,
         paragraph_direction: ParagraphDirection,
     ) -> Self {
         Self {
@@ -325,6 +331,7 @@ impl PreparedText {
                 style_hash,
                 locale_hash,
                 white_space,
+                word_break,
                 paragraph_direction,
             }),
         }
@@ -340,6 +347,10 @@ impl PreparedText {
 
     pub(crate) fn white_space(&self) -> WhiteSpaceMode {
         self.core.white_space
+    }
+
+    pub(crate) fn word_break(&self) -> WordBreakMode {
+        self.core.word_break
     }
 
     pub(crate) fn paragraph_direction(&self) -> ParagraphDirection {
@@ -516,6 +527,7 @@ impl PrepareCacheKey {
             style: TextStyleCacheKey::new(style),
             locale,
             white_space: opts.white_space,
+            word_break: opts.word_break,
             paragraph_direction: opts.paragraph_direction,
         }
     }
@@ -538,6 +550,7 @@ impl AtomicPlaceholderCacheKey {
             width_bits: width.max(0.0).to_bits(),
             locale,
             white_space: opts.white_space,
+            word_break: opts.word_break,
             paragraph_direction: opts.paragraph_direction,
         }
     }
@@ -700,6 +713,15 @@ impl PretextEngine {
             .walk_line_ranges_calls
             .fetch_add(1, Ordering::Relaxed);
         layout::walk_line_ranges(prepared, max_width, on_line, self.para_cache.as_ref())
+    }
+
+    pub(crate) fn layout_next_line_range(
+        &self,
+        prepared: &PreparedTextWithSegments,
+        start: &mut LayoutCursor,
+        max_width: f32,
+    ) -> Option<(LayoutLineRange, bool)> {
+        layout::layout_next_line_range(prepared, start, max_width, self.para_cache.as_ref())
     }
 
     pub fn layout_next_line(
@@ -991,6 +1013,8 @@ mod tests {
                 include_bytes!("../../../demos/app/assets/fonts/NotoSansCJK-Regular.ttc").to_vec(),
                 include_bytes!("../../../demos/app/assets/fonts/NotoSansMyanmar-Regular.ttf")
                     .to_vec(),
+                include_bytes!("../../../demos/app/assets/fonts/NotoEmoji-Regular.ttf").to_vec(),
+                include_bytes!("../../../demos/app/assets/fonts/NotoColorEmoji.ttf").to_vec(),
                 include_bytes!("../../../demos/app/assets/fonts/Noto-COLRv1.ttf").to_vec(),
                 include_bytes!("../../../demos/app/assets/fonts/NotoSansMono-Regular.ttf").to_vec(),
             ],
@@ -1682,6 +1706,7 @@ mod tests {
             &style,
             &PrepareOptions {
                 white_space: WhiteSpaceMode::PreWrap,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );

@@ -20,8 +20,9 @@ pub mod line_break;
 pub mod measure;
 
 pub mod advanced;
+pub mod rich_inline;
 
-pub use crate::analysis::WhiteSpaceMode;
+pub use crate::analysis::{WhiteSpaceMode, WordBreakMode};
 pub use crate::bidi::{BidiDirection, ParagraphDirection};
 pub use crate::engine::{
     EngineRuntimeStats, LayoutLineGlyphRun as PretextGlyphRun,

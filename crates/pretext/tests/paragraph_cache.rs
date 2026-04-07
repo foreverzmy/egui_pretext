@@ -24,6 +24,7 @@ fn paragraph_cache_separates_styles() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
     let prepared_large = engine.prepare_paragraph(
@@ -32,6 +33,7 @@ fn paragraph_cache_separates_styles() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
 
@@ -45,6 +47,7 @@ fn paragraph_cache_separates_styles() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
     let fresh_large_layout = fresh_engine.layout_paragraph(&fresh_prepared_large, 190.0, 34.0);
@@ -65,6 +68,7 @@ fn paragraph_cache_separates_whitespace_modes() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
     let pre_wrap = engine.prepare_paragraph(
@@ -73,6 +77,7 @@ fn paragraph_cache_separates_whitespace_modes() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::PreWrap,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
 
@@ -92,6 +97,7 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
     let wide = engine.prepare_atomic_placeholder(
@@ -99,6 +105,7 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
 
@@ -111,6 +118,7 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
     let fresh_wide_layout = fresh_engine.layout_paragraph(&fresh_wide, 24.0, 20.0);

@@ -1,8 +1,9 @@
 use ahash::AHashMap;
 
 use crate::analysis::{
-    is_cjk, is_cjk_line_end_prohibited, is_cjk_line_start_prohibited, slice_text, AnalyzedGrapheme,
-    GraphemeKind, TextAnalysis,
+    can_continue_keep_all_text_run, contains_cjk_text, is_cjk, is_cjk_line_end_prohibited,
+    is_cjk_line_start_prohibited, slice_text, AnalyzedGrapheme, GraphemeKind, TextAnalysis,
+    WordBreakMode,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +17,7 @@ struct BreakContext<'a> {
     analysis: &'a TextAnalysis,
     grapheme_index: usize,
     current: &'a AnalyzedGrapheme,
+    next: Option<&'a AnalyzedGrapheme>,
     current_text: &'a str,
     next_text: Option<&'a str>,
     baseline: BreakOpportunity,
@@ -29,6 +31,7 @@ const OVERRIDE_RULES: &[BreakRule] = &[
     rule_wj,
     rule_zwsp,
     rule_soft_hyphen,
+    rule_keep_all_text_run,
     rule_cjk_punctuation,
     rule_url_atom,
 ];
@@ -44,11 +47,13 @@ pub(crate) fn compute_breaks(analysis: &TextAnalysis) -> Vec<BreakOpportunity> {
             .graphemes
             .get(index + 1)
             .map(|next| slice_text(&analysis.normalized, &next.byte_range));
+        let next = analysis.graphemes.get(index + 1);
 
         let mut opportunity = break_opportunity(&BreakContext {
             analysis,
             grapheme_index: index,
             current,
+            next,
             current_text,
             next_text,
             baseline: baseline_by_byte
@@ -136,6 +141,19 @@ fn rule_soft_hyphen(_ctx: &BreakContext<'_>) -> BreakOpportunity {
     BreakOpportunity::Allowed
 }
 
+fn rule_keep_all_text_run(ctx: &BreakContext<'_>) -> BreakOpportunity {
+    if ctx.analysis.word_break != WordBreakMode::KeepAll
+        || ctx.current.kind != GraphemeKind::Text
+        || !ctx.next.is_some_and(|next| next.kind == GraphemeKind::Text)
+        || !contains_cjk_text(ctx.current_text)
+        || !can_continue_keep_all_text_run(ctx.current_text)
+    {
+        return BreakOpportunity::Allowed;
+    }
+
+    BreakOpportunity::Prohibited
+}
+
 fn rule_cjk_punctuation(ctx: &BreakContext<'_>) -> BreakOpportunity {
     if ctx
         .next_text
@@ -188,7 +206,7 @@ fn contains_word_joiner(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{compute_breaks, merge, BreakOpportunity};
-    use crate::analysis::WhiteSpaceMode;
+    use crate::analysis::{WhiteSpaceMode, WordBreakMode};
     use crate::engine::PrepareOptions;
 
     #[test]
@@ -197,6 +215,7 @@ mod tests {
             "a\u{00A0}b",
             &PrepareOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
             },
             None,
@@ -212,6 +231,7 @@ mod tests {
             "a\u{200B}b",
             &PrepareOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
             },
             None,
@@ -226,6 +246,7 @@ mod tests {
             "\n\u{00A0}a",
             &PrepareOptions {
                 white_space: WhiteSpaceMode::PreWrap,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
             },
             None,
@@ -240,6 +261,7 @@ mod tests {
             "https://example.com/path",
             &PrepareOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
             },
             None,
@@ -257,12 +279,31 @@ mod tests {
             "你。",
             &PrepareOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
             },
             None,
         );
         let breaks = compute_breaks(&analysis);
         assert_eq!(breaks[0], BreakOpportunity::Prohibited);
+    }
+
+    #[test]
+    fn keep_all_suppresses_cjk_led_no_space_breaks() {
+        let analysis = crate::analysis::analyze_text(
+            "日本語foo-bar",
+            &PrepareOptions {
+                white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::KeepAll,
+                paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+            },
+            None,
+        );
+        let breaks = compute_breaks(&analysis);
+
+        assert_eq!(breaks[0], BreakOpportunity::Prohibited);
+        assert_eq!(breaks[1], BreakOpportunity::Prohibited);
+        assert_eq!(breaks[2], BreakOpportunity::Prohibited);
     }
 
     #[test]

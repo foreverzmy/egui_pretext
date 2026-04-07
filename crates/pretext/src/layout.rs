@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use unicode_bidi::{BidiInfo, Level};
 
-use crate::analysis::{analyze_text, slice_text, GraphemeKind, WhiteSpaceMode};
+use crate::analysis::{analyze_text, slice_text, GraphemeKind, WhiteSpaceMode, WordBreakMode};
 use crate::bidi::paragraph_to_bidi_runs;
 use crate::engine::{
     GraphemeMeta, LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineGlyphRun, LayoutLineRange,
@@ -36,6 +36,7 @@ struct ParagraphCacheKey {
     obstacles_hash: u64,
     locale_hash: u64,
     white_space: WhiteSpaceMode,
+    word_break: WordBreakMode,
     paragraph_direction: crate::bidi::ParagraphDirection,
 }
 
@@ -165,6 +166,7 @@ pub(crate) fn prepare_text(
         style_hash,
         locale_hash,
         analysis.white_space,
+        analysis.word_break,
         opts.paragraph_direction,
     );
 
@@ -207,6 +209,7 @@ pub(crate) fn prepare_atomic_placeholder(
         0,
         locale_hash,
         opts.white_space,
+        opts.word_break,
         opts.paragraph_direction,
     );
 
@@ -258,7 +261,7 @@ pub(crate) fn layout_with_lines(
     let lines = paragraph
         .lines
         .iter()
-        .map(|line| materialize_line(prepared.inner(), line.range, line.add_hyphen))
+        .map(|line| materialize_line_range(prepared.inner(), line.range, line.add_hyphen))
         .collect::<Vec<_>>();
 
     LayoutWithLinesResult {
@@ -294,8 +297,8 @@ pub(crate) fn layout_next_line(
     max_width: f32,
     cache: Option<&ParagraphCache>,
 ) -> Option<LayoutLine> {
-    let (range, add_hyphen) = next_line_range(prepared, start, max_width, cache)?;
-    Some(materialize_line(prepared.inner(), range, add_hyphen))
+    let (range, add_hyphen) = layout_next_line_range(prepared, start, max_width, cache)?;
+    Some(materialize_line_range(prepared.inner(), range, add_hyphen))
 }
 
 pub(crate) fn layout_next_line_with_glyph_runs(
@@ -304,7 +307,7 @@ pub(crate) fn layout_next_line_with_glyph_runs(
     max_width: f32,
     cache: Option<&ParagraphCache>,
 ) -> Option<LayoutLineWithGlyphRuns> {
-    let (range, add_hyphen) = next_line_range(prepared, start, max_width, cache)?;
+    let (range, add_hyphen) = layout_next_line_range(prepared, start, max_width, cache)?;
     Some(materialize_line_with_glyph_runs(
         prepared.inner(),
         range,
@@ -318,7 +321,7 @@ pub(crate) fn layout_next_line_with_runs(
     max_width: f32,
     cache: Option<&ParagraphCache>,
 ) -> Option<LayoutLineWithRuns> {
-    let (range, add_hyphen) = next_line_range(prepared, start, max_width, cache)?;
+    let (range, add_hyphen) = layout_next_line_range(prepared, start, max_width, cache)?;
     Some(materialize_line_with_runs(
         prepared.inner(),
         range,
@@ -326,7 +329,7 @@ pub(crate) fn layout_next_line_with_runs(
     ))
 }
 
-fn next_line_range(
+pub(crate) fn layout_next_line_range(
     prepared: &PreparedTextWithSegments,
     start: &mut LayoutCursor,
     max_width: f32,
@@ -399,7 +402,7 @@ fn materialize_line_and_internal_runs(
     range: LayoutLineRange,
     add_hyphen: bool,
 ) -> (LayoutLine, LineRunsInternal) {
-    let line = materialize_line(prepared, range, add_hyphen);
+    let line = materialize_line_range(prepared, range, add_hyphen);
     let internal = line_runs_internal(prepared, &line);
     (line, internal)
 }
@@ -823,7 +826,7 @@ impl Iterator for EitherSegmentIter {
     }
 }
 
-fn materialize_line(
+pub(crate) fn materialize_line_range(
     prepared: &PreparedText,
     range: LayoutLineRange,
     add_hyphen: bool,
@@ -1005,6 +1008,7 @@ fn paragraph_layout(
             obstacles_hash: 0,
             locale_hash: prepared.locale_hash(),
             white_space: prepared.white_space(),
+            word_break: prepared.word_break(),
             paragraph_direction: prepared.paragraph_direction(),
         };
         return cache.get_or_compute(key, || {

@@ -12,6 +12,7 @@ fn pre_wrap_newline_forces_break() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::PreWrap,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
 
@@ -33,6 +34,7 @@ fn soft_hyphen_only_appears_when_line_break_uses_it() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            ..PretextParagraphOptions::default()
         },
     );
 

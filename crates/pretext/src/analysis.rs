@@ -19,6 +19,12 @@ pub enum WhiteSpaceMode {
     PreWrap,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum WordBreakMode {
+    Normal,
+    KeepAll,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GraphemeKind {
     Text,
@@ -62,6 +68,7 @@ pub(crate) struct TextAnalysis {
     pub segments: Vec<AnalyzedSegment>,
     pub urls: Vec<Range<usize>>,
     pub white_space: WhiteSpaceMode,
+    pub word_break: WordBreakMode,
 }
 
 type LocaleWordSegmenterCache = RefCell<HashMap<String, Option<Rc<WordSegmenter>>>>;
@@ -80,6 +87,7 @@ pub(crate) fn analyze_text(
     locale: Option<&str>,
 ) -> TextAnalysis {
     let white_space = opts.white_space;
+    let word_break = opts.word_break;
     let normalized = match white_space {
         WhiteSpaceMode::Normal => normalize_whitespace_normal(text),
         WhiteSpaceMode::PreWrap => normalize_whitespace_pre_wrap(text),
@@ -96,7 +104,14 @@ pub(crate) fn analyze_text(
             })
             .collect();
     let urls = find_url_spans(&normalized);
-    let segments = build_segments(&normalized, &graphemes, white_space, &urls, locale);
+    let segments = build_segments(
+        &normalized,
+        &graphemes,
+        white_space,
+        word_break,
+        &urls,
+        locale,
+    );
 
     TextAnalysis {
         normalized,
@@ -104,6 +119,7 @@ pub(crate) fn analyze_text(
         segments,
         urls,
         white_space,
+        word_break,
     }
 }
 
@@ -151,6 +167,16 @@ pub(crate) fn is_cjk(text: &str) -> bool {
     text.chars().all(is_cjk_char)
 }
 
+pub(crate) fn contains_cjk_text(text: &str) -> bool {
+    text.chars().any(is_cjk_char)
+}
+
+pub(crate) fn can_continue_keep_all_text_run(text: &str) -> bool {
+    text.chars()
+        .last()
+        .is_some_and(|ch| !is_left_sticky_punctuation_char(ch) && !is_keep_all_glue_char(ch))
+}
+
 pub(crate) fn is_cjk_char(ch: char) -> bool {
     let c = ch as u32;
     matches!(
@@ -162,7 +188,10 @@ pub(crate) fn is_cjk_char(ch: char) -> bool {
             | 0x2B740..=0x2B81F
             | 0x2B820..=0x2CEAF
             | 0x2CEB0..=0x2EBEF
+            | 0x2EBF0..=0x2EE5D
             | 0x30000..=0x3134F
+            | 0x31350..=0x323AF
+            | 0x323B0..=0x33479
             | 0xF900..=0xFAFF
             | 0x2F800..=0x2FA1F
             | 0x3000..=0x303F
@@ -171,6 +200,10 @@ pub(crate) fn is_cjk_char(ch: char) -> bool {
             | 0xAC00..=0xD7AF
             | 0xFF00..=0xFFEF
     )
+}
+
+fn is_keep_all_glue_char(ch: char) -> bool {
+    matches!(ch, '\u{00A0}' | '\u{202F}' | '\u{2060}' | '\u{FEFF}')
 }
 
 pub(crate) fn is_cjk_line_start_prohibited(text: &str) -> bool {
@@ -304,6 +337,7 @@ fn build_segments(
     normalized: &str,
     graphemes: &[AnalyzedGrapheme],
     white_space: WhiteSpaceMode,
+    word_break: WordBreakMode,
     urls: &[Range<usize>],
     locale: Option<&str>,
 ) -> Vec<AnalyzedSegment> {
@@ -321,7 +355,7 @@ fn build_segments(
     pieces = merge_initial_text_pieces(normalized, pieces);
     merge_escaped_quote_clusters_into_previous(normalized, &mut pieces);
     merge_forward_sticky_into_next(normalized, &mut pieces);
-    pieces = merge_glue_connected_text_runs(pieces);
+    pieces = merge_glue_connected_text_runs(normalized, word_break, pieces);
     pieces = merge_url_like_runs(normalized, urls, &grapheme_starts, graphemes, pieces);
     pieces = merge_numeric_runs(normalized, pieces);
     pieces = split_hyphenated_numeric_runs(normalized, &grapheme_starts, graphemes, pieces);
@@ -333,6 +367,9 @@ fn build_segments(
         pieces,
     );
     merge_leading_marks_after_space(normalized, &mut pieces);
+    if word_break == WordBreakMode::KeepAll {
+        pieces = merge_keep_all_text_runs(normalized, pieces);
+    }
 
     pieces
         .into_iter()
@@ -571,7 +608,11 @@ fn merge_forward_sticky_into_next(normalized: &str, pieces: &mut Vec<Segmentatio
     }
 }
 
-fn merge_glue_connected_text_runs(pieces: Vec<SegmentationPiece>) -> Vec<SegmentationPiece> {
+fn merge_glue_connected_text_runs(
+    normalized: &str,
+    word_break: WordBreakMode,
+    pieces: Vec<SegmentationPiece>,
+) -> Vec<SegmentationPiece> {
     let mut merged = Vec::with_capacity(pieces.len());
     let mut read = 0usize;
 
@@ -616,6 +657,16 @@ fn merge_glue_connected_text_runs(pieces: Vec<SegmentationPiece>) -> Vec<Segment
                 }
 
                 if read < pieces.len() && pieces[read].kind == AnalysisSegmentKind::Text {
+                    let current_text = slice_text(normalized, &piece.byte_range);
+                    let next_text = slice_text(normalized, &pieces[read].byte_range);
+                    if word_break == WordBreakMode::KeepAll
+                        && !contains_cjk_text(current_text)
+                        && contains_cjk_text(next_text)
+                    {
+                        piece.byte_range.end = trailing_glue.byte_range.end;
+                        piece.grapheme_range.end = trailing_glue.grapheme_range.end;
+                        break;
+                    }
                     piece.byte_range.end = pieces[read].byte_range.end;
                     piece.grapheme_range.end = pieces[read].grapheme_range.end;
                     piece.word_like = piece.word_like || pieces[read].word_like;
@@ -882,6 +933,33 @@ fn merge_leading_marks_after_space(normalized: &str, pieces: &mut Vec<Segmentati
             index += 1;
         }
     }
+}
+
+fn merge_keep_all_text_runs(
+    normalized: &str,
+    pieces: Vec<SegmentationPiece>,
+) -> Vec<SegmentationPiece> {
+    let mut merged: Vec<SegmentationPiece> = Vec::with_capacity(pieces.len());
+
+    for piece in pieces {
+        if let Some(previous) = merged.last_mut() {
+            let previous_text = slice_text(normalized, &previous.byte_range);
+            if previous.kind == AnalysisSegmentKind::Text
+                && piece.kind == AnalysisSegmentKind::Text
+                && can_continue_keep_all_text_run(previous_text)
+                && contains_cjk_text(previous_text)
+            {
+                previous.byte_range.end = piece.byte_range.end;
+                previous.grapheme_range.end = piece.grapheme_range.end;
+                previous.word_like = previous.word_like || piece.word_like;
+                continue;
+            }
+        }
+
+        merged.push(piece);
+    }
+
+    merged
 }
 
 fn make_text_piece(
@@ -1224,6 +1302,27 @@ mod tests {
         segment_texts_with_locale(text, white_space, None)
     }
 
+    fn segment_texts_with_word_break(
+        text: &str,
+        white_space: WhiteSpaceMode,
+        word_break: WordBreakMode,
+    ) -> Vec<String> {
+        let analysis = analyze_text(
+            text,
+            &PrepareOptions {
+                white_space,
+                word_break,
+                paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+            },
+            None,
+        );
+        analysis
+            .segments
+            .iter()
+            .map(|segment| slice_text(&analysis.normalized, &segment.byte_range).to_owned())
+            .collect()
+    }
+
     fn segment_texts_with_locale(
         text: &str,
         white_space: WhiteSpaceMode,
@@ -1233,6 +1332,7 @@ mod tests {
             text,
             &PrepareOptions {
                 white_space,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
             },
             locale,
@@ -1352,5 +1452,57 @@ mod tests {
             segment_texts_with_locale("EU:ssä", WhiteSpaceMode::Normal, Some("fi")),
             vec!["EU:ssä".to_owned()]
         );
+    }
+
+    #[test]
+    fn keep_all_keeps_cjk_leading_no_space_runs_cohesive() {
+        assert_eq!(
+            segment_texts_with_word_break(
+                "中文，测试。",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["中文，".to_owned(), "测试。".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "한국어테스트",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["한국어테스트".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "日本語foo-bar",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["日本語foo-bar".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "foo-bar日本語",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["foo-".to_owned(), "bar".to_owned(), "日本語".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "foo\u{00A0}世界",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["foo\u{00A0}".to_owned(), "世界".to_owned()]
+        );
+    }
+
+    #[test]
+    fn is_cjk_covers_newer_extension_blocks() {
+        assert!(is_cjk("\u{2EBF0}"));
+        assert!(is_cjk("\u{31350}"));
+        assert!(is_cjk("\u{323B0}"));
+        assert!(!is_cjk("hello"));
     }
 }

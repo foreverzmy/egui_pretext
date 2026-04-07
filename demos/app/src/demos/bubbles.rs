@@ -320,6 +320,7 @@ fn bubble_text_style() -> TextStyleSpec {
 fn bubble_prepare_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Ltr,
     }
 }

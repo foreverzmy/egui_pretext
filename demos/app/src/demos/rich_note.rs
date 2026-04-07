@@ -4,12 +4,16 @@ use egui::{
     Stroke, StrokeKind, UiBuilder,
 };
 use pretext::advanced::LayoutCursor;
-use pretext::BidiDirection;
 use pretext::{
-    PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
+    rich_inline::{
+        layout_rich_inline, prepare_rich_inline, PreparedRichInline,
+        RichInlineBreakMode as FlowBreakMode, RichInlineFragment as FlowFragment,
+        RichInlineItemSpec as FlowItemSpec,
+    },
+    BidiDirection, ParagraphDirection, PretextEngine, PretextGlyphRun as LayoutLineGlyphRun,
     PretextParagraphOptions as PrepareOptions,
     PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
-    PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode,
+    PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode, WordBreakMode,
 };
 use pretext_egui::{
     advanced::{
@@ -80,7 +84,7 @@ const NOTE_SHADOW: egui::epaint::Shadow = egui::epaint::Shadow {
 pub struct RichNoteDemo {
     open: bool,
     requested_width: f32,
-    items: Option<Vec<InlineItem>>,
+    prepared: Option<PreparedRichNote>,
     layout_cache: Option<CachedRichNoteLayout>,
 }
 
@@ -89,7 +93,7 @@ impl Default for RichNoteDemo {
         Self {
             open: false,
             requested_width: BODY_DEFAULT_WIDTH,
-            items: None,
+            prepared: None,
             layout_cache: None,
         }
     }
@@ -136,6 +140,12 @@ struct TextStyleModel {
 }
 
 #[derive(Clone)]
+struct PreparedRichNote {
+    flow: PreparedRichInline,
+    items: Vec<InlineItem>,
+}
+
+#[derive(Clone)]
 enum InlineItem {
     Text(TextInlineItem),
     Chip(ChipInlineItem),
@@ -145,26 +155,22 @@ enum InlineItem {
 struct TextInlineItem {
     style_name: TextStyleName,
     chrome_width: f32,
-    end_cursor: LayoutCursor,
+    #[cfg_attr(not(test), allow(dead_code))]
     full_text: String,
     #[cfg_attr(not(test), allow(dead_code))]
     full_visual_runs: Vec<LayoutLineVisualRun>,
-    full_glyph_runs: Vec<LayoutLineGlyphRun>,
-    full_emoji_overlays: Vec<EmojiOverlayRun>,
-    full_width: f32,
-    leading_gap: f32,
     prepared: PreparedTextWithSegments,
 }
 
 #[derive(Clone)]
 struct ChipInlineItem {
     tone: ChipTone,
-    leading_gap: f32,
     text: String,
     glyph_runs: Vec<LayoutLineGlyphRun>,
     emoji_overlays: Vec<EmojiOverlayRun>,
     text_width: f32,
     chrome_width: f32,
+    #[cfg_attr(not(test), allow(dead_code))]
     prepared: PreparedTextWithSegments,
 }
 
@@ -378,7 +384,7 @@ impl RichNoteDemo {
                         let body_width = requested_width
                             .clamp(BODY_MIN_WIDTH, max_body_width)
                             .round();
-                        self.ensure_items(engine);
+                        self.ensure_prepared(engine);
                         let layout = self.ensure_layout(engine, body_width);
                         paint_preview(
                             ui,
@@ -397,13 +403,13 @@ impl RichNoteDemo {
         self.requested_width = requested_width.clamp(BODY_MIN_WIDTH, max_body_width);
     }
 
-    fn ensure_items(&mut self, engine: &PretextEngine) -> &[InlineItem] {
-        if self.items.is_none() {
-            self.items = Some(prepare_inline_items(engine, INLINE_SPECS));
+    fn ensure_prepared(&mut self, engine: &PretextEngine) -> &PreparedRichNote {
+        if self.prepared.is_none() {
+            self.prepared = Some(prepare_rich_note(engine, INLINE_SPECS));
         }
 
-        self.items
-            .as_deref()
+        self.prepared
+            .as_ref()
             .expect("rich note items should be prepared")
     }
 
@@ -416,11 +422,11 @@ impl RichNoteDemo {
 
         if should_rebuild {
             let lines = {
-                let items = self
-                    .items
-                    .as_deref()
+                let prepared = self
+                    .prepared
+                    .as_ref()
                     .expect("rich note items should be prepared before layout");
-                layout_inline_items(engine, items, body_width)
+                layout_inline_items(engine, prepared, body_width)
             };
             let line_count = lines.len();
             let note_body_height = if line_count == 0 {
@@ -699,23 +705,13 @@ fn chip_text_style() -> &'static TextStyleSpec {
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
-        paragraph_direction: pretext::ParagraphDirection::Auto,
+        word_break: WordBreakMode::Normal,
+        paragraph_direction: ParagraphDirection::Auto,
     }
 }
 
-fn measure_single_line_width(engine: &PretextEngine, prepared: &PreparedTextWithSegments) -> f32 {
-    let mut max_width = 0.0f32;
-    engine.walk_line_ranges(prepared, UNBOUNDED_WIDTH, |line| {
-        max_width = max_width.max(line.width);
-    });
-    max_width
-}
-
-fn measure_collapsed_space_width(engine: &PretextEngine, style: &TextStyleSpec) -> f32 {
-    let joined = engine.prepare_paragraph("A A", style, &normal_options());
-    let compact = engine.prepare_paragraph("AA", style, &normal_options());
-    (measure_single_line_width(engine, &joined) - measure_single_line_width(engine, &compact))
-        .max(0.0)
+fn is_collapsible_boundary_char(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000C}')
 }
 
 fn fragment_overlay_options(
@@ -733,11 +729,9 @@ fn fragment_overlay_options(
     }
 }
 
-fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec<InlineItem> {
-    let inline_boundary_gap =
-        measure_collapsed_space_width(engine, text_style_model(TextStyleName::Body).spec);
-    let mut items = Vec::new();
-    let mut pending_gap = 0.0f32;
+fn prepare_rich_note(engine: &PretextEngine, specs: &[RichInlineSpec]) -> PreparedRichNote {
+    let mut flow_items = Vec::with_capacity(specs.len());
+    let mut items = Vec::with_capacity(specs.len());
 
     for spec in specs {
         match *spec {
@@ -755,11 +749,19 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
                     engine,
                 );
                 let text_width = label_line.line.width.ceil();
+                let layout_extra_width =
+                    CHIP_CHROME_WIDTH + (text_width - label_line.line.width).max(0.0);
                 let prepared = engine
                     .prepare_atomic_placeholder(text_width + CHIP_CHROME_WIDTH, &normal_options());
+
+                flow_items.push(FlowItemSpec {
+                    text: label,
+                    style: chip_text_style(),
+                    break_mode: FlowBreakMode::Never,
+                    extra_width: layout_extra_width,
+                });
                 items.push(InlineItem::Chip(ChipInlineItem {
                     tone,
-                    leading_gap: pending_gap,
                     text: label.to_owned(),
                     glyph_runs,
                     emoji_overlays,
@@ -767,210 +769,104 @@ fn prepare_inline_items(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Vec
                     chrome_width: CHIP_CHROME_WIDTH,
                     prepared,
                 }));
-                pending_gap = 0.0;
             }
             RichInlineSpec::Text { text, style } => {
-                let carry_gap = pending_gap;
-                let has_leading_whitespace = text.chars().next().is_some_and(char::is_whitespace);
-                let has_trailing_whitespace = text.chars().last().is_some_and(char::is_whitespace);
-                let trimmed_text = text.trim();
-                pending_gap = if has_trailing_whitespace {
-                    inline_boundary_gap
-                } else {
-                    0.0
-                };
-
-                if trimmed_text.is_empty() {
-                    continue;
-                }
-
                 let style_model = text_style_model(style);
+                flow_items.push(FlowItemSpec {
+                    text,
+                    style: style_model.spec,
+                    break_mode: FlowBreakMode::Normal,
+                    extra_width: style_model.chrome_width,
+                });
+
+                let trimmed_text = text.trim_matches(is_collapsible_boundary_char);
+                assert!(
+                    !trimmed_text.is_empty(),
+                    "rich note text specs should keep visible content after boundary whitespace collapse",
+                );
+
                 let prepared =
                     engine.prepare_paragraph(trimmed_text, style_model.spec, &normal_options());
                 let mut cursor = LINE_START_CURSOR;
-                let Some(whole_line) =
-                    engine.layout_next_line_with_runs(&prepared, &mut cursor, UNBOUNDED_WIDTH)
-                else {
-                    continue;
-                };
-                let (full_glyph_runs, full_emoji_overlays) = split_builtin_emoji_glyphs(
-                    &whole_line.runs.visual_runs,
-                    &whole_line.runs.glyph_runs,
-                    fragment_overlay_options(
-                        style_model.spec,
-                        fragment_metrics_for_style(style_model.style_name, 0.0),
-                    ),
-                    engine,
-                );
+                let whole_line = engine
+                    .layout_next_line_with_runs(&prepared, &mut cursor, UNBOUNDED_WIDTH)
+                    .expect("rich note text item should fit in an unbounded line");
 
                 items.push(InlineItem::Text(TextInlineItem {
                     style_name: style_model.style_name,
                     chrome_width: style_model.chrome_width,
-                    end_cursor: whole_line.line.end,
                     full_text: whole_line.line.text,
                     full_visual_runs: whole_line.runs.visual_runs,
-                    full_glyph_runs,
-                    full_emoji_overlays,
-                    full_width: whole_line.line.width,
-                    leading_gap: if carry_gap > 0.0 || has_leading_whitespace {
-                        inline_boundary_gap
-                    } else {
-                        0.0
-                    },
                     prepared,
                 }));
             }
         }
     }
 
-    items
+    PreparedRichNote {
+        flow: prepare_rich_inline(engine, &flow_items),
+        items,
+    }
 }
 
 fn layout_inline_items(
     engine: &PretextEngine,
-    items: &[InlineItem],
+    prepared: &PreparedRichNote,
     max_width: f32,
 ) -> Vec<RichLine> {
-    let safe_width = max_width.max(1.0);
-    let mut lines = Vec::new();
-    let mut item_index = 0usize;
-    let mut text_cursor: Option<LayoutCursor> = None;
+    layout_rich_inline(engine, &prepared.flow, max_width)
+        .into_iter()
+        .map(|line| RichLine {
+            fragments: line
+                .fragments
+                .into_iter()
+                .map(|fragment| {
+                    build_line_fragment(engine, &prepared.items[fragment.item_index], fragment)
+                })
+                .collect(),
+        })
+        .collect()
+}
 
-    while item_index < items.len() {
-        let mut fragments = Vec::new();
-        let mut line_width = 0.0f32;
-        let mut remaining_width = safe_width;
+fn build_line_fragment(
+    engine: &PretextEngine,
+    item: &InlineItem,
+    fragment: FlowFragment,
+) -> LineFragment {
+    match item {
+        InlineItem::Text(item) => {
+            let line = fragment.line;
+            let runs = engine.line_runs(&item.prepared, &line);
+            let (glyph_runs, emoji_overlays) = split_builtin_emoji_glyphs(
+                &runs.visual_runs,
+                &runs.glyph_runs,
+                fragment_overlay_options(
+                    text_style_model(item.style_name).spec,
+                    fragment_metrics_for_style(item.style_name, 0.0),
+                ),
+                engine,
+            );
 
-        while item_index < items.len() {
-            match &items[item_index] {
-                InlineItem::Chip(item) => {
-                    let leading_gap = if fragments.is_empty() {
-                        0.0
-                    } else {
-                        item.leading_gap
-                    };
-                    let mut line_cursor = LINE_START_CURSOR;
-                    let Some(line) = engine.layout_next_line(
-                        &item.prepared,
-                        &mut line_cursor,
-                        (remaining_width - leading_gap).max(1.0),
-                    ) else {
-                        item_index += 1;
-                        text_cursor = None;
-                        continue;
-                    };
-
-                    if !fragments.is_empty() && leading_gap + line.width > remaining_width {
-                        break;
-                    }
-
-                    fragments.push(LineFragment {
-                        kind: FragmentKind::Chip(item.tone),
-                        leading_gap,
-                        text: item.text.clone(),
-                        glyph_runs: item.glyph_runs.clone(),
-                        emoji_overlays: item.emoji_overlays.clone(),
-                        text_width: item.text_width,
-                        chrome_width: item.chrome_width,
-                    });
-                    line_width += leading_gap + line.width;
-                    remaining_width = (safe_width - line_width).max(0.0);
-                    item_index += 1;
-                    text_cursor = None;
-                }
-                InlineItem::Text(item) => {
-                    if text_cursor.is_some_and(|cursor| cursor == item.end_cursor) {
-                        item_index += 1;
-                        text_cursor = None;
-                        continue;
-                    }
-
-                    let leading_gap = if fragments.is_empty() {
-                        0.0
-                    } else {
-                        item.leading_gap
-                    };
-                    let reserved_width = leading_gap + item.chrome_width;
-                    if !fragments.is_empty() && reserved_width >= remaining_width {
-                        break;
-                    }
-
-                    if text_cursor.is_none() {
-                        let full_width = leading_gap + item.full_width + item.chrome_width;
-                        if full_width <= remaining_width {
-                            fragments.push(LineFragment {
-                                kind: fragment_kind_for_style(item.style_name),
-                                leading_gap,
-                                text: item.full_text.clone(),
-                                glyph_runs: item.full_glyph_runs.clone(),
-                                emoji_overlays: item.full_emoji_overlays.clone(),
-                                text_width: item.full_width,
-                                chrome_width: item.chrome_width,
-                            });
-                            line_width += full_width;
-                            remaining_width = (safe_width - line_width).max(0.0);
-                            item_index += 1;
-                            continue;
-                        }
-                    }
-
-                    let start_cursor = text_cursor.unwrap_or(LINE_START_CURSOR);
-                    let mut line_cursor = start_cursor;
-                    let Some(line) = engine.layout_next_line_with_runs(
-                        &item.prepared,
-                        &mut line_cursor,
-                        (remaining_width - reserved_width).max(1.0),
-                    ) else {
-                        item_index += 1;
-                        text_cursor = None;
-                        continue;
-                    };
-
-                    if start_cursor == line.line.end {
-                        item_index += 1;
-                        text_cursor = None;
-                        continue;
-                    }
-                    let (glyph_runs, emoji_overlays) = split_builtin_emoji_glyphs(
-                        &line.runs.visual_runs,
-                        &line.runs.glyph_runs,
-                        fragment_overlay_options(
-                            text_style_model(item.style_name).spec,
-                            fragment_metrics_for_style(item.style_name, 0.0),
-                        ),
-                        engine,
-                    );
-
-                    fragments.push(LineFragment {
-                        kind: fragment_kind_for_style(item.style_name),
-                        leading_gap,
-                        text: line.line.text,
-                        glyph_runs,
-                        emoji_overlays,
-                        text_width: line.line.width,
-                        chrome_width: item.chrome_width,
-                    });
-                    line_width += leading_gap + line.line.width + item.chrome_width;
-                    remaining_width = (safe_width - line_width).max(0.0);
-
-                    if line.line.end == item.end_cursor {
-                        item_index += 1;
-                        text_cursor = None;
-                    } else {
-                        text_cursor = Some(line.line.end);
-                        break;
-                    }
-                }
+            LineFragment {
+                kind: fragment_kind_for_style(item.style_name),
+                leading_gap: fragment.leading_gap,
+                text: line.text,
+                glyph_runs,
+                emoji_overlays,
+                text_width: line.width,
+                chrome_width: item.chrome_width,
             }
         }
-
-        if fragments.is_empty() {
-            break;
-        }
-        lines.push(RichLine { fragments });
+        InlineItem::Chip(item) => LineFragment {
+            kind: FragmentKind::Chip(item.tone),
+            leading_gap: fragment.leading_gap,
+            text: item.text.clone(),
+            glyph_runs: item.glyph_runs.clone(),
+            emoji_overlays: item.emoji_overlays.clone(),
+            text_width: item.text_width,
+            chrome_width: item.chrome_width,
+        },
     }
-
-    lines
 }
 
 fn fragment_kind_for_style(style_name: TextStyleName) -> FragmentKind {
@@ -1219,8 +1115,8 @@ mod tests {
     #[test]
     fn chips_stay_atomic_across_lines() {
         let engine = bundled_engine();
-        let items = prepare_inline_items(&engine, INLINE_SPECS);
-        let lines = layout_inline_items(&engine, &items, 310.0);
+        let prepared = prepare_rich_note(&engine, INLINE_SPECS);
+        let lines = layout_inline_items(&engine, &prepared, 310.0);
 
         let chip_labels: Vec<&'static str> = INLINE_SPECS
             .iter()
@@ -1245,9 +1141,9 @@ mod tests {
     #[test]
     fn rich_note_layout_is_deterministic() {
         let engine = bundled_engine();
-        let items = prepare_inline_items(&engine, INLINE_SPECS);
-        let first = layout_inline_items(&engine, &items, 420.0);
-        let second = layout_inline_items(&engine, &items, 420.0);
+        let prepared = prepare_rich_note(&engine, INLINE_SPECS);
+        let first = layout_inline_items(&engine, &prepared, 420.0);
+        let second = layout_inline_items(&engine, &prepared, 420.0);
         assert_eq!(first, second);
     }
 
@@ -1263,8 +1159,9 @@ mod tests {
     #[test]
     fn rich_note_keeps_visual_runs_for_mixed_direction_text() {
         let engine = bundled_engine();
-        let items = prepare_inline_items(&engine, INLINE_SPECS);
-        let mixed = items
+        let prepared = prepare_rich_note(&engine, INLINE_SPECS);
+        let mixed = prepared
+            .items
             .iter()
             .find_map(|item| match item {
                 InlineItem::Text(item) if item.full_text.contains("عربي") => Some(item),
@@ -1287,9 +1184,10 @@ mod tests {
     #[test]
     fn chips_use_engine_atomic_placeholders() {
         let engine = bundled_engine();
-        let items = prepare_inline_items(&engine, INLINE_SPECS);
+        let prepared = prepare_rich_note(&engine, INLINE_SPECS);
 
-        let chip = items
+        let chip = prepared
+            .items
             .iter()
             .find_map(|item| match item {
                 InlineItem::Chip(chip) => Some(chip),
@@ -1323,7 +1221,7 @@ mod tests {
         let mut demo = RichNoteDemo {
             open: true,
             requested_width: BODY_DEFAULT_WIDTH,
-            items: None,
+            prepared: None,
             layout_cache: None,
         };
 

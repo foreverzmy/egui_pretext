@@ -2,20 +2,59 @@
 
 Use this file to find the nearest working pattern before changing layout code.
 
-## Core crates
+Start here before relying on `plan.md`. If the plan disagrees with current code, follow the current code and refresh the docs.
+
+## Public API boundaries
+
+### `crates/pretext/src/lib.rs`
+
+Read this first when you need the stable SDK names:
+
+- `PretextEngine::builder`
+- `PretextStyle`
+- `PretextParagraphOptions`
+- `PretextPreparedParagraph`
+- `PretextParagraphMetrics`
+- `PretextParagraphLayout`
+
+Use this file when deciding whether the code should stay on the stable root path or move into `pretext::advanced`.
+
+### `crates/pretext/src/advanced.rs`
+
+Read this when lower-level text flow is actually required:
+
+- `LayoutCursor`
+- `PreparedText`
+- `prepare_text`
+- `measure_text`
+- `layout_lines`
+- shaping and font exports
+
+Use this file for cursor-driven continuation, low-level line payloads, custom shaping inspection, or debugging.
+
+### `crates/pretext/src/rich_inline.rs`
+
+Read this when the job is inline-only rich text rather than full block layout:
+
+- boundary whitespace collapse
+- atomic inline items and inline chrome
+- width-only stats for virtualized UIs
+- line-range walking without DOM reads
+
+Use this file for markdown-ish chat messages, inline code pills, or mixed-style flowing fragments that should still behave like one line box stream.
 
 ### `crates/pretext/src/engine.rs`
 
-Read this first when you need the public text API surface:
+Read this when behavior depends on cache keys, cursor advancement, paragraph convenience methods, or advanced engine entry points.
 
-- `prepare` and `prepare_with_segments`
-- `layout`, `layout_with_lines`, `layout_with_runs`
+Use this file to understand:
+
+- `prepare_paragraph`, `measure_paragraph`, `layout_paragraph`
 - `walk_line_ranges`
 - `layout_next_line`, `layout_next_line_with_glyph_runs`, `layout_next_line_with_runs`
 - `prepare_atomic_placeholder`
 - `prefix_widths`
-
-Use this file when choosing the minimal layout API for a task.
+- paragraph cache bucketing and runtime stats
 
 ### `crates/pretext/src/layout.rs`
 
@@ -30,23 +69,49 @@ Use this file to understand:
 
 ### `crates/pretext-egui/src/lib.rs`
 
-Read this when deciding how `pretext` output becomes `egui` paint commands.
+Read this first when deciding how stable `pretext` output becomes `egui` paint commands.
 
 Important entry points:
 
-- `AssetRegistry`
-- `PretextParagraphLayout`
-- `PretextParagraph`
-- `PretextFragmentPainter`
-- `paint_pretext_paragraph`
+- `EguiPretextRenderer`
+- `EguiPretextParagraph`
+- `EguiPretextPaintOptions`
+- `paint_paragraph`
+- `paragraph`
+- `rasterize_text_texture`
+- `stats`
+
+Use this file when the stable renderer path may be enough.
+
+### `crates/pretext-egui/src/advanced.rs`
+
+Read this when the task is really about lower-level painting:
+
 - `paint_positioned_text_runs`
 - `paint_styled_positioned_text_runs`
-- `shaped_text_texture`
-- atlas warmup helpers
+- `PretextFragmentPainter`
+- `paint_line_glyph_runs`
+- `enqueue_atlas_warmup`
+- `tick_atlas_warmup`
+- glyph-scene and emoji-overlay helpers
+
+### `crates/pretext-egui/src/experimental.rs`
+
+Read this when the task is demo bootstrapping or bundled assets:
+
+- `demo_assets::bundled_font_data`
+- `demo_assets::install_demo_fonts`
+- bundled SVG and emoji asset helpers
+
+Use this file only for demo and test asset plumbing.
 
 ### `crates/pretext-egui/src/glyph_atlas.rs`
 
 Read this when the problem is really about atlas lifetime, glyph upload behavior, baseline calculation, mesh batching, or color glyph rasterization.
+
+### `crates/pretext-render/src/lib.rs`
+
+Read this when the change is really about shaped text textures, rasterized vertical extents, or color-glyph baseline behavior outside the egui paragraph path.
 
 ## App shell
 
@@ -57,12 +122,22 @@ Read this when the change touches global engine setup, bundled fonts, atlas warm
 Use this file as the pattern for:
 
 - constructing `PretextEngine`
-- constructing and retaining `AssetRegistry`
+- constructing and retaining `EguiPretextRenderer`
+- bootstrapping bundled demo fonts
 - priming fonts
 - scheduling atlas warmup
 - showing perf HUD counters
 
 ## Demo patterns
+
+### `demos/app/src/demos/accordion.rs`
+
+Read this for:
+
+- standard paragraph widgets and explicit paragraph painting
+- pairing paragraph measurement with paragraph layout
+- width-quantized disclosure caches
+- shaped-text texture regression tests on mixed-script content
 
 ### `demos/app/src/demos/bubbles.rs`
 
@@ -70,24 +145,37 @@ Read this for:
 
 - shrinkwrap width search
 - `walk_line_ranges` usage
-- paragraph-level rendering through `PretextParagraphLayout`
+- paragraph-level rendering through `paint_paragraph`
 - bubble sizing driven by text geometry
 
 ### `demos/app/src/demos/rich_note.rs`
 
 Read this for:
 
+- `pretext::rich_inline` in a real demo
 - inline item modeling
 - `prepare_atomic_placeholder`
+- mixed inline flow plus chip placeholders
+- emoji overlay splitting
 - mixed fragment painting
 - styled positioned runs
 - chip-like non-breaking content in flowing text
+
+### `demos/app/src/demos/markdown_chat.rs`
+
+Read this for:
+
+- `pulldown-cmark` driven markdown-ish content
+- `pretext::rich_inline` for inline code, links, and image chips
+- height measurement before paint
+- viewport virtualization without DOM reads
+- ordered visible-range materialization
 
 ### `demos/app/src/demos/masonry.rs`
 
 Read this for:
 
-- pre-measuring card heights before placement
+- pre-measuring card heights with `prepared.measure(...)`
 - layout decisions driven by text height
 - positioned text runs inside card layouts
 
@@ -113,7 +201,7 @@ Read this for:
 - obstacle-aware layout
 - `layout_next_line_with_runs`
 - `PretextFragmentPainter` inside a custom paint pipeline
-- mixing SVG-driven geometry and text reflow
+- mixing SVG-driven geometry, demo assets, and text reflow
 
 ### `demos/app/src/demos/editorial_engine.rs`
 
@@ -133,9 +221,13 @@ Read this when text must interact with a moving visual object and glyph runs mus
 
 ## How to choose a reference quickly
 
+- Need a standard paragraph widget or measured disclosure content: start with `accordion.rs`
 - Need plain paragraph geometry or shrinkwrap: start with `bubbles.rs`
+- Need height-only card measurement: start with `masonry.rs`
+- Need inline-only rich flow primitives: start with `crates/pretext/src/rich_inline.rs`
+- Need markdown-like chat bubbles or virtualized rich messages: start with `markdown_chat.rs`
 - Need inline chips or mixed text fragments: start with `rich_note.rs`
-- Need measured card heights: start with `masonry.rs`
 - Need explicit positioned runs: start with `justification_algorithms.rs`
 - Need obstacle-aware or animated wrap: start with `dynamic_layout.rs`
 - Need cursor-driven multi-column flow: start with `editorial_engine.rs`
+- Need text reacting to a moving visual object: start with `dragon_through_text.rs`

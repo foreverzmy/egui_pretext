@@ -624,6 +624,7 @@ fn default_style() -> PretextStyle {
 fn default_options() -> PretextParagraphOptions {
     PretextParagraphOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
     }
 }

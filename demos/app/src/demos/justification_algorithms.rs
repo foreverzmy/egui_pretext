@@ -1418,6 +1418,7 @@ fn river_highlight_color(space_width: f32, normal_space_width: f32) -> Option<Co
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
     }
 }

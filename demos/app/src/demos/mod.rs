@@ -5,6 +5,7 @@ pub mod dragon_through_text;
 pub mod dynamic_layout;
 pub mod editorial_engine;
 pub mod justification_algorithms;
+pub mod markdown_chat;
 pub mod masonry;
 pub mod rich_note;
 pub mod variable_typographic_ascii;
@@ -42,6 +43,7 @@ pub fn default_demos() -> Vec<Box<dyn DemoWindow>> {
     vec![
         Box::new(accordion::AccordionDemo::default()),
         Box::new(bubbles::BubblesDemo::default()),
+        Box::new(markdown_chat::MarkdownChatDemo::default()),
         Box::new(rich_note::RichNoteDemo::default()),
         Box::new(masonry::MasonryDemo::default()),
         Box::new(dynamic_layout::DynamicLayoutDemo::default()),

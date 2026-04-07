@@ -165,6 +165,31 @@ impl GlyphAtlas {
         }
 
         let pixels_per_point = ctx.pixels_per_point().max(1.0);
+        for run in glyph_runs {
+            for glyph in &run.glyphs {
+                if self
+                    .glyph_entry(
+                        ctx,
+                        engine,
+                        glyph.face_id,
+                        glyph.glyph_id,
+                        style.size_px,
+                        pixels_per_point,
+                        texture_uploads,
+                        texture_upload_bytes,
+                    )
+                    .is_none()
+                {
+                    let Some(face) = engine.load_face(glyph.face_id) else {
+                        return false;
+                    };
+                    if glyph_has_visible_ink(&face, glyph.glyph_id) {
+                        return false;
+                    }
+                }
+            }
+        }
+
         let baseline_y = y + self.baseline_px(glyph_runs, style, line_height, engine);
 
         for run in glyph_runs {
@@ -182,17 +207,32 @@ impl GlyphAtlas {
                     continue;
                 };
 
-                let rect_min = egui::pos2(
-                    snap_to_pixel(
-                        x + glyph.x + glyph.x_offset + lookup.entry.offset.x,
+                let rect = if engine
+                    .load_face(glyph.face_id)
+                    .as_ref()
+                    .is_some_and(|face| face_uses_emoji_baseline_defaults(face, glyph.glyph_id))
+                {
+                    centered_emoji_rect(
+                        x + glyph.x,
+                        y,
+                        glyph.advance,
+                        line_height,
+                        lookup.entry.logical_size,
                         pixels_per_point,
-                    ),
-                    snap_to_pixel(
-                        baseline_y - glyph.y_offset + lookup.entry.offset.y,
-                        pixels_per_point,
-                    ),
-                );
-                let rect = Rect::from_min_size(rect_min, lookup.entry.logical_size);
+                    )
+                } else {
+                    let rect_min = egui::pos2(
+                        snap_to_pixel(
+                            x + glyph.x + glyph.x_offset + lookup.entry.offset.x,
+                            pixels_per_point,
+                        ),
+                        snap_to_pixel(
+                            baseline_y - glyph.y_offset + lookup.entry.offset.y,
+                            pixels_per_point,
+                        ),
+                    );
+                    Rect::from_min_size(rect_min, lookup.entry.logical_size)
+                };
                 let texture_id = self.pages[lookup.entry.page_index].texture.id();
                 let mesh = scene
                     .meshes
@@ -277,6 +317,12 @@ impl GlyphAtlas {
 
         for glyph in glyph_runs.iter().flat_map(|run| run.glyphs.iter()) {
             if !seen.insert(glyph.face_id) {
+                continue;
+            }
+            let Some(face) = engine.load_face(glyph.face_id) else {
+                continue;
+            };
+            if face_uses_emoji_baseline_defaults(&face, glyph.glyph_id) {
                 continue;
             }
             let Some(metrics) = self.face_metrics(engine, glyph.face_id, style.size_px) else {
@@ -394,6 +440,55 @@ impl GlyphAtlas {
         self.pages.push(page);
         Some(allocation(page_index, pos, size))
     }
+}
+
+fn glyph_has_visible_ink(face: &pretext::font_catalog::LoadedFace, glyph_id: u16) -> bool {
+    let Ok(ttf) = ttf_parser::Face::parse(face.data(), face.face_index()) else {
+        return true;
+    };
+    let glyph_id = ttf_parser::GlyphId(glyph_id);
+    ttf.is_color_glyph(glyph_id) || ttf.glyph_bounding_box(glyph_id).is_some()
+}
+
+fn face_uses_emoji_baseline_defaults(
+    face: &pretext::font_catalog::LoadedFace,
+    glyph_id: u16,
+) -> bool {
+    let family_name = face.family_name();
+    if family_name.contains("Emoji") {
+        return true;
+    }
+
+    let Ok(ttf) = ttf_parser::Face::parse(face.data(), face.face_index()) else {
+        return false;
+    };
+    ttf.is_color_glyph(ttf_parser::GlyphId(glyph_id))
+}
+
+fn centered_emoji_rect(
+    advance_left: f32,
+    slot_top: f32,
+    advance_width: f32,
+    line_height: f32,
+    logical_size: egui::Vec2,
+    pixels_per_point: f32,
+) -> Rect {
+    let target_height = logical_size.y.min(line_height.max(1.0));
+    let scale = if logical_size.y > 0.0 {
+        target_height / logical_size.y
+    } else {
+        1.0
+    };
+    let target_width = (logical_size.x * scale).max(1.0);
+    let x = advance_left + (advance_width - target_width).max(0.0) * 0.5;
+    let y = slot_top + (line_height - target_height).max(0.0) * 0.5;
+    Rect::from_min_size(
+        egui::pos2(
+            snap_to_pixel(x, pixels_per_point),
+            snap_to_pixel(y, pixels_per_point),
+        ),
+        egui::vec2(target_width, target_height),
+    )
 }
 
 struct Allocation {

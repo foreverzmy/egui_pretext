@@ -37,12 +37,13 @@ fn mixed_script_prefix_widths_are_monotonic() {
 }
 
 #[test]
-fn bundled_fonts_measure_arabic_and_rocket_emoji() {
+fn bundled_fonts_measure_arabic_and_extended_emoji() {
     let engine = support::bundled_engine();
     let style = support::default_style();
 
     assert!(engine.glyph_advance('ب', &style) > 0.0);
     assert!(engine.glyph_advance('🚀', &style) > 0.0);
+    assert!(engine.glyph_advance('🧪', &style) > 0.0);
 }
 
 #[test]

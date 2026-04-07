@@ -518,6 +518,7 @@ fn masonry_text_style() -> &'static TextStyleSpec {
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: pretext::ParagraphDirection::Auto,
     }
 }

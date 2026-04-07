@@ -354,6 +354,7 @@ impl DragonThroughTextDemo {
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: pretext::ParagraphDirection::Auto,
     }
 }

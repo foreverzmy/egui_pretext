@@ -185,6 +185,7 @@ pub fn compute_editorial_golden(engine: &PretextEngine) -> EditorialGolden {
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
     }
 }

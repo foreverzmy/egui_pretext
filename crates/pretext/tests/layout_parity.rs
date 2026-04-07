@@ -10,6 +10,7 @@ fn layout_interfaces_stay_in_sync() {
     let opts = PretextParagraphOptions {
         white_space: WhiteSpaceMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
+        ..PretextParagraphOptions::default()
     };
     let text = "English العربية mixed with CJK 漢字 and emoji 👨‍👩‍👧‍👦 for parity.";
 

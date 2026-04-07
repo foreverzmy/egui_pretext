@@ -343,7 +343,8 @@ impl PretextFragmentPainter {
             assets,
         );
         let emoji_only_fragment = glyph_runs.is_empty() && !emoji_overlays.is_empty();
-        if !painted_glyphs && !emoji_only_fragment {
+        let needs_text_fallback = !painted_glyphs && !emoji_only_fragment;
+        if needs_text_fallback {
             self.pending_fallbacks.push(PendingFallbackText {
                 origin: egui::pos2(x, slot_top),
                 text: text.to_owned(),
@@ -353,7 +354,7 @@ impl PretextFragmentPainter {
             });
         }
 
-        if !emoji_overlays.is_empty() {
+        if !emoji_overlays.is_empty() && !needs_text_fallback {
             self.pending_emoji.push(PendingEmojiPaint {
                 line_left: x,
                 slot_top,

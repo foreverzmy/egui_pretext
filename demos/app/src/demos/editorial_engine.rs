@@ -949,6 +949,7 @@ fn clamp_texture_size_to_limit(size: [usize; 2], max_texture_side: usize) -> [us
 fn normal_options() -> PrepareOptions {
     PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
+        word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: pretext::ParagraphDirection::Auto,
     }
 }

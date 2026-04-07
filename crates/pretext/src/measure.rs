@@ -236,6 +236,7 @@ pub(crate) fn prefix_widths(
         segments: Vec::new(),
         urls: Vec::new(),
         white_space: crate::analysis::WhiteSpaceMode::PreWrap,
+        word_break: crate::analysis::WordBreakMode::Normal,
     };
     let bidi_runs =
         crate::bidi::paragraph_to_bidi_runs(text, crate::bidi::ParagraphDirection::Auto);

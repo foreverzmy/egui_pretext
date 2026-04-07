@@ -496,6 +496,8 @@ mod tests {
             include_bytes!("../../../demos/app/assets/fonts/NotoSansArabic-Regular.ttf").to_vec(),
             include_bytes!("../../../demos/app/assets/fonts/NotoSansCJK-Regular.ttc").to_vec(),
             include_bytes!("../../../demos/app/assets/fonts/NotoSansMyanmar-Regular.ttf").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/NotoEmoji-Regular.ttf").to_vec(),
+            include_bytes!("../../../demos/app/assets/fonts/NotoColorEmoji.ttf").to_vec(),
             include_bytes!("../../../demos/app/assets/fonts/Noto-COLRv1.ttf").to_vec(),
             include_bytes!("../../../demos/app/assets/fonts/NotoSansMono-Regular.ttf").to_vec(),
         ]

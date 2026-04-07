@@ -192,6 +192,8 @@ impl EguiPretextRenderer {
             include_demo_asset!("fonts/NotoSansArabic-Regular.ttf").to_vec(),
             include_demo_asset!("fonts/NotoSansCJK-Regular.ttc").to_vec(),
             include_demo_asset!("fonts/NotoSansMyanmar-Regular.ttf").to_vec(),
+            include_demo_asset!("fonts/NotoEmoji-Regular.ttf").to_vec(),
+            include_demo_asset!("fonts/NotoColorEmoji.ttf").to_vec(),
             include_demo_asset!("fonts/Noto-COLRv1.ttf").to_vec(),
             include_demo_asset!("fonts/NotoSansMono-Regular.ttf").to_vec(),
         ]
@@ -596,6 +598,14 @@ impl EguiPretextRenderer {
             FontData::from_static(include_demo_asset!("fonts/NotoSansMyanmar-Regular.ttf")).into(),
         );
         fonts.font_data.insert(
+            "noto-emoji-regular-local".to_owned(),
+            FontData::from_static(include_demo_asset!("fonts/NotoEmoji-Regular.ttf")).into(),
+        );
+        fonts.font_data.insert(
+            "noto-color-emoji".to_owned(),
+            FontData::from_static(include_demo_asset!("fonts/NotoColorEmoji.ttf")).into(),
+        );
+        fonts.font_data.insert(
             "noto-colr-emoji".to_owned(),
             FontData::from_static(include_demo_asset!("fonts/Noto-COLRv1.ttf")).into(),
         );
@@ -609,14 +619,18 @@ impl EguiPretextRenderer {
         proportional.insert(1, "noto-sans-arabic".to_owned());
         proportional.insert(2, "noto-sans-cjk".to_owned());
         proportional.insert(3, "noto-sans-myanmar".to_owned());
-        proportional.insert(4, "noto-colr-emoji".to_owned());
+        proportional.insert(4, "noto-emoji-regular-local".to_owned());
+        proportional.insert(5, "noto-color-emoji".to_owned());
+        proportional.insert(6, "noto-colr-emoji".to_owned());
 
         let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
         monospace.insert(0, "noto-sans-mono".to_owned());
         monospace.insert(1, "noto-sans-arabic".to_owned());
         monospace.insert(2, "noto-sans-cjk".to_owned());
         monospace.insert(3, "noto-sans-myanmar".to_owned());
-        monospace.insert(4, "noto-colr-emoji".to_owned());
+        monospace.insert(4, "noto-emoji-regular-local".to_owned());
+        monospace.insert(5, "noto-color-emoji".to_owned());
+        monospace.insert(6, "noto-colr-emoji".to_owned());
 
         fonts
     }
@@ -865,7 +879,7 @@ fn warmup_line_height(size_px: f32) -> f32 {
 mod tests {
     use super::*;
     use egui::{FontId, RawInput, Rect, TextureId};
-    use pretext::{ParagraphDirection, PretextParagraphOptions, WhiteSpaceMode};
+    use pretext::{ParagraphDirection, PretextParagraphOptions, WhiteSpaceMode, WordBreakMode};
 
     fn engine() -> PretextEngine {
         PretextEngine::builder()
@@ -908,14 +922,48 @@ mod tests {
         }
     }
 
+    fn shape_y_bounds(shape: &egui::Shape) -> Option<(f32, f32)> {
+        match shape {
+            egui::Shape::Vec(shapes) => {
+                shapes
+                    .iter()
+                    .filter_map(shape_y_bounds)
+                    .fold(None, |acc, (min_y, max_y)| match acc {
+                        Some((acc_min, acc_max)) => Some((acc_min.min(min_y), acc_max.max(max_y))),
+                        None => Some((min_y, max_y)),
+                    })
+            }
+            egui::Shape::Mesh(mesh) => {
+                let mut vertices = mesh.vertices.iter();
+                let first = vertices.next()?;
+                let mut min_y = first.pos.y;
+                let mut max_y = first.pos.y;
+                for vertex in vertices {
+                    min_y = min_y.min(vertex.pos.y);
+                    max_y = max_y.max(vertex.pos.y);
+                }
+                Some((min_y, max_y))
+            }
+            _ => None,
+        }
+    }
+
     #[test]
-    fn ui_fonts_prefer_local_colr_emoji_font() {
+    fn ui_fonts_prefer_local_emoji_fonts_over_builtin_fallbacks() {
         let fonts = EguiPretextRenderer::demo_font_definitions();
         let proportional = fonts
             .families
             .get(&FontFamily::Proportional)
             .expect("proportional family");
-        let local_emoji = proportional
+        let local_outline = proportional
+            .iter()
+            .position(|name| name == "noto-emoji-regular-local")
+            .expect("expected local Noto Emoji font in proportional family");
+        let local_color = proportional
+            .iter()
+            .position(|name| name == "noto-color-emoji")
+            .expect("expected local Noto Color Emoji font in proportional family");
+        let local_colr = proportional
             .iter()
             .position(|name| name == "noto-colr-emoji")
             .expect("expected local COLRv1 emoji font in proportional family");
@@ -924,12 +972,17 @@ mod tests {
             .position(|name| name == "NotoEmoji-Regular")
             .expect("expected builtin emoji fallback in proportional family");
 
-        assert!(local_emoji < builtin_emoji);
+        assert!(local_outline < builtin_emoji);
+        assert!(local_color < builtin_emoji);
+        assert!(local_colr < builtin_emoji);
+        assert!(local_outline < local_color);
         assert!(fonts.font_data.contains_key("noto-colr-emoji"));
+        assert!(fonts.font_data.contains_key("noto-color-emoji"));
+        assert!(fonts.font_data.contains_key("noto-emoji-regular-local"));
     }
 
     #[test]
-    fn installed_ui_fonts_cover_mixed_arabic_and_emoji_text() {
+    fn installed_ui_fonts_cover_mixed_arabic_and_extended_emoji_text() {
         let ctx = egui::Context::default();
         experimental::demo_assets::install_demo_fonts(&ctx);
 
@@ -938,15 +991,17 @@ mod tests {
             let font_id = FontId::new(16.0, FontFamily::Proportional);
             probe = Some(ctx.fonts_mut(|fonts| {
                 (
-                    fonts.has_glyphs(&font_id, "بدأت الرحلة 🚀"),
+                    fonts.has_glyphs(&font_id, "بدأت الرحلة 🚀 🧪"),
                     fonts.glyph_width(&font_id, '🚀'),
+                    fonts.glyph_width(&font_id, '🧪'),
                 )
             }));
         });
-        let (supports_sample, rocket_width) = probe.expect("expected probe result");
+        let (supports_sample, rocket_width, lab_width) = probe.expect("expected probe result");
 
         assert!(supports_sample);
         assert!(rocket_width > 0.0);
+        assert!(lab_width > 0.0);
     }
 
     #[test]
@@ -1009,10 +1064,11 @@ mod tests {
     fn bundled_font_data_drives_pretext_engine() {
         let engine = engine();
         let prepared = engine.prepare_paragraph(
-            "emoji ✅ and Arabic العربية",
+            "emoji ✅🧪 and Arabic العربية",
             &default_style(),
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1030,6 +1086,7 @@ mod tests {
             &style,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1076,6 +1133,7 @@ mod tests {
             &style,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1106,6 +1164,7 @@ mod tests {
             &style,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1159,6 +1218,7 @@ mod tests {
             &style,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1220,6 +1280,7 @@ mod tests {
             &style,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1228,6 +1289,7 @@ mod tests {
             &mono,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );
@@ -1342,6 +1404,201 @@ mod tests {
     }
 
     #[test]
+    fn fragment_painter_keeps_mixed_emoji_in_font_backed_glyph_runs() {
+        let ctx = egui::Context::default();
+        experimental::demo_assets::install_demo_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        let engine = engine();
+        let style = default_style();
+        let prepared = engine.prepare_paragraph(
+            "Mixed emoji 🧪 keeps fallback honest.",
+            &style,
+            &PretextParagraphOptions {
+                white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
+                paragraph_direction: ParagraphDirection::Auto,
+            },
+        );
+        let layout = engine.layout_paragraph(&prepared, 320.0, 22.0);
+        let first_line = &layout.lines[0];
+
+        let mut fallback_count = None;
+        let mut painted = false;
+        let output = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(360.0, 120.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("fragment-mixed-emoji-fallback"),
+                ));
+                let options = EguiPretextPaintOptions::new(&style, 22.0)
+                    .color(egui::Color32::WHITE)
+                    .fallback_font(FontId::new(style.size_px, FontFamily::Proportional))
+                    .fallback_align(egui::Align2::LEFT_TOP);
+                let mut fragment_painter = PretextFragmentPainter::new(&assets);
+                fragment_painter.push_fragment(
+                    24.0,
+                    32.0,
+                    &first_line.line.text,
+                    &first_line.runs.glyph_runs,
+                    &[],
+                    &options,
+                    ctx,
+                    &engine,
+                    &mut assets,
+                );
+                fallback_count = Some(fragment_painter.pending_fallbacks.len());
+                painted = fragment_painter.finish(&painter, ctx, &mut assets);
+            },
+        );
+
+        assert_eq!(
+            fallback_count,
+            Some(0),
+            "expected local emoji fonts to avoid whole-fragment fallback"
+        );
+        assert!(painted);
+        assert!(assets.stats().atlas_entries > 0);
+        assert!(!output.shapes.is_empty());
+    }
+
+    #[test]
+    fn fragment_painter_keeps_builtin_overlay_when_sibling_emoji_is_font_backed() {
+        let ctx = egui::Context::default();
+        experimental::demo_assets::install_demo_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        let engine = engine();
+        let style = default_style();
+        let prepared = engine.prepare_paragraph(
+            "Built-in 🚀 plus lab 🧪",
+            &style,
+            &PretextParagraphOptions {
+                white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
+                paragraph_direction: ParagraphDirection::Auto,
+            },
+        );
+        let layout = engine.layout_paragraph(&prepared, 320.0, 22.0);
+        let first_line = &layout.lines[0];
+        let (glyph_runs, emoji_overlays) = split_builtin_emoji_glyphs(
+            &first_line.runs.visual_runs,
+            &first_line.runs.glyph_runs,
+            EmojiOverlayOptions {
+                style: &style,
+                slot_height: 22.0,
+                padding_x: 0.0,
+                padding_y: 0.0,
+                slack_x: 0.0,
+                slack_y: 0.0,
+                baseline_mode: BaselineMode::AutoFontMetrics,
+            },
+            &engine,
+        );
+
+        let mut fallback_count = None;
+        let mut overlay_count = None;
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            let options = EguiPretextPaintOptions::new(&style, 22.0)
+                .color(egui::Color32::WHITE)
+                .fallback_font(FontId::new(style.size_px, FontFamily::Proportional))
+                .fallback_align(egui::Align2::LEFT_TOP);
+            let mut fragment_painter = PretextFragmentPainter::new(&assets);
+            fragment_painter.push_fragment(
+                24.0,
+                32.0,
+                &first_line.line.text,
+                &glyph_runs,
+                &emoji_overlays,
+                &options,
+                ctx,
+                &engine,
+                &mut assets,
+            );
+            fallback_count = Some(fragment_painter.pending_fallbacks.len());
+            overlay_count = Some(fragment_painter.pending_emoji.len());
+        });
+
+        assert_eq!(fallback_count, Some(0));
+        assert_eq!(overlay_count, Some(1));
+    }
+
+    #[test]
+    fn mixed_font_backed_emoji_mesh_stays_inside_line_slot() {
+        let ctx = egui::Context::default();
+        experimental::demo_assets::install_demo_fonts(&ctx);
+        let mut assets = EguiPretextRenderer::default();
+        let engine = engine();
+        let style = default_style();
+        let prepared = engine.prepare_paragraph(
+            "Mixed emoji 🧪 stays on the same line.",
+            &style,
+            &PretextParagraphOptions {
+                white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
+                paragraph_direction: ParagraphDirection::Auto,
+            },
+        );
+        let layout = engine.layout_paragraph(&prepared, 360.0, 22.0);
+        let first_line = &layout.lines[0];
+        let y = 32.0;
+        let line_bottom = y + 22.0;
+
+        let output = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(420.0, 140.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("mixed-emoji-line-slot"),
+                ));
+                let _ = paint_positioned_text_runs(
+                    &painter,
+                    [PositionedTextRunRef {
+                        x: 24.0,
+                        y,
+                        text: &first_line.line.text,
+                        glyph_runs: &first_line.runs.glyph_runs,
+                        emoji_overlays: &[],
+                    }],
+                    &EguiPretextPaintOptions::new(&style, 22.0)
+                        .color(egui::Color32::WHITE)
+                        .fallback_align(egui::Align2::LEFT_TOP),
+                    ctx,
+                    &engine,
+                    &mut assets,
+                );
+            },
+        );
+        let bounds = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| shape_y_bounds(&clipped.shape))
+            .fold(None::<(f32, f32)>, |acc, (min_y, max_y)| match acc {
+                Some((acc_min, acc_max)) => Some((acc_min.min(min_y), acc_max.max(max_y))),
+                None => Some((min_y, max_y)),
+            })
+            .expect("expected painted mesh bounds");
+
+        assert!(bounds.0 >= y - 4.0, "unexpected top bound: {:?}", bounds);
+        assert!(
+            bounds.1 <= line_bottom + 4.0,
+            "emoji glyphs spilled below line slot: {:?}",
+            bounds
+        );
+    }
+
+    #[test]
     fn paint_line_glyph_runs_reuses_cached_atlas_entries() {
         let ctx = egui::Context::default();
         let mut assets = EguiPretextRenderer::default();
@@ -1352,6 +1609,7 @@ mod tests {
             &style,
             &PretextParagraphOptions {
                 white_space: WhiteSpaceMode::Normal,
+                word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
             },
         );

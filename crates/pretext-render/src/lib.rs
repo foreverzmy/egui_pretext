@@ -389,6 +389,9 @@ fn shaped_text_vertical_extents(
     let mut descent = request.style.size_px * raster_scale * 0.2;
 
     for span in spans {
+        if span_uses_emoji_baseline_defaults(span) {
+            continue;
+        }
         let Ok(face) = ttf_parser::Face::parse(span.face.data(), span.face.face_index()) else {
             continue;
         };
@@ -399,6 +402,18 @@ fn shaped_text_vertical_extents(
     }
 
     (ascent.max(1.0), descent.max(0.0))
+}
+
+fn span_uses_emoji_baseline_defaults(span: &ShapedTextSpan) -> bool {
+    if span.face.family_name().contains("Emoji") {
+        return true;
+    }
+    let Ok(face) = ttf_parser::Face::parse(span.face.data(), span.face.face_index()) else {
+        return false;
+    };
+    span.glyphs
+        .iter()
+        .any(|glyph| face.is_color_glyph(ttf_parser::GlyphId(glyph.glyph_id)))
 }
 
 fn quantize_f32(value: f32) -> u32 {

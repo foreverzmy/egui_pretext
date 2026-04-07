@@ -1,4 +1,4 @@
 interface:
   display_name: "egui + pretext Layout"
-  short_description: "Compose egui UI with pretext text layout"
-  default_prompt: "Use $egui-pretext-layout to implement or refactor layout code that mixes egui widgets and painting with pretext text preparation, line layout, or glyph-run rendering."
+  short_description: "Compose egui UI with stable and advanced pretext layout APIs"
+  default_prompt: "Use $egui-pretext-layout to implement or refactor code that mixes egui widgets or painting with pretext paragraph preparation, measurement, layout, rich inline flow, or custom rendering. Prefer the stable root APIs first, use pretext::rich_inline for inline-only mixed-style text, and switch to pretext::advanced or pretext_egui::advanced only when the task needs cursor-driven flow, positioned runs, glyph scenes, or other low-level control."
