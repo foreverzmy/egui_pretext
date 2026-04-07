@@ -290,6 +290,10 @@ impl AccordionDemo {
 }
 
 impl DemoWindow for AccordionDemo {
+    fn id(&self) -> &'static str {
+        "accordion"
+    }
+
     fn title(&self) -> &str {
         "Accordion"
     }

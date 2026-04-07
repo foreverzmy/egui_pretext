@@ -10,6 +10,7 @@ Use this checklist after changing layout code that mixes `egui` and `pretext`.
 4. Run `cargo test -p pretext-demo-app` when demo logic, bundled asset bootstrapping, or egui integration changed.
 5. Run `cargo test --all` if the change crosses crates or multiple demos.
 6. Run `cargo run -p pretext-demo-app` for visual confirmation when interaction or paint output changed.
+7. If the task touched warmup or cache lifetime, open a heavy demo twice and confirm the second open stays warm.
 
 ## Targeted test map
 
@@ -33,6 +34,8 @@ Use this checklist after changing layout code that mixes `egui` and `pretext`.
 - Texture or atlas caches reuse handles or entries on the second pass
 - Virtualized visible ranges remain ordered and rebuild the correct padding when the viewport changes
 - `EguiPretextRenderer::stats()` reflects the expected cache path instead of silent fallback-only rendering
+- warmup state reaches `ready` after enough frames
+- reopening a heavy demo does not drop back to cold-start work unless the engine revision changed
 
 ## Visual checks
 
@@ -42,4 +45,5 @@ Use this checklist after changing layout code that mixes `egui` and `pretext`.
 - Exercise emoji or color glyphs if the change touches atlas or fallback behavior
 - Exercise drag or animation if the change touches obstacle-aware reflow
 - Exercise virtualization or occlusion if the change touches markdown/chat-style scrolling surfaces
+- Exercise heavy demo first-open behavior if the change touches staged warmup or loading shells
 - If bundled demo assets are involved, install demo fonts first so `egui` fallback matches engine fonts

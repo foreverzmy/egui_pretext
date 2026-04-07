@@ -27,6 +27,8 @@ If the task is mostly chrome or standard widgets, stay in `egui`. If the task ne
    - Reuse `PretextPreparedParagraph` across frames.
    - Reuse one long-lived `EguiPretextRenderer` across frames.
    - Treat text, style, width bucket, obstacle signature, and locale as reflow keys.
+   - For heavy demos, move cold-start work into `warmup_step(...)` instead of doing it inside `show(...)`.
+   - Keep expensive caches alive across close/open unless an engine revision or real layout key changed.
 4. Choose the smallest `pretext` API that matches the job.
    - Engine/bootstrap: `PretextEngine::builder()`; use `pretext_egui::experimental::demo_assets::{bundled_font_data, install_demo_fonts}` only in demos/tests.
    - Standard paragraph prep: `prepare_paragraph`
@@ -76,4 +78,5 @@ If the task is mostly chrome or standard widgets, stay in `egui`. If the task ne
 
 - Read `references/repo-map.md` when you need file-level examples from this workspace.
 - Read `references/patterns.md` when you need API selection guidance or implementation recipes.
+- Read `references/performance.md` when the task is about first-open jank, warmup stages, cache lifetime, or app-level performance policy.
 - Read `references/validation.md` when you need test targets, visual checks, or golden update commands.

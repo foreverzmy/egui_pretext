@@ -317,6 +317,10 @@ impl Default for JustificationAlgorithmsDemo {
 }
 
 impl DemoWindow for JustificationAlgorithmsDemo {
+    fn id(&self) -> &'static str {
+        "justification_algorithms"
+    }
+
     fn title(&self) -> &str {
         TITLE
     }

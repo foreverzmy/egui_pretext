@@ -23,7 +23,7 @@ use pretext_egui::{
     EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
-use crate::demos::{DemoPerfStats, DemoWindow};
+use crate::demos::{format_warmup_status, DemoPerfStats, DemoWarmupStatus, DemoWindow};
 #[cfg(test)]
 use crate::geometry::carve_text_line_slots;
 use crate::geometry::{
@@ -144,6 +144,8 @@ const CREDIT_LINE_HEIGHT: f32 = 16.0;
 const MIN_PAGE_HEIGHT: f32 = 520.0;
 const LOGO_RASTER_SIZE: [usize; 2] = [512, 512];
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const WINDOW_DEFAULT_WIDTH: f32 = 1180.0;
+const WINDOW_DEFAULT_HEIGHT: f32 = 1480.0;
 const HINT_PILL_SAFE_TOP: f32 = 72.0;
 const NARROW_BREAKPOINT: f32 = 760.0;
 const COMPACT_BREAKPOINT: f32 = 980.0;
@@ -371,6 +373,17 @@ enum ColumnSide {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DynamicWarmupStage {
+    PrepareBody,
+    PrepareCredit,
+    PrepareHulls,
+    Layout,
+    Geometries,
+    Projection,
+    Ready,
+}
+
 impl Default for DynamicLayoutDemo {
     fn default() -> Self {
         Self {
@@ -395,6 +408,10 @@ impl Default for DynamicLayoutDemo {
 }
 
 impl DemoWindow for DynamicLayoutDemo {
+    fn id(&self) -> &'static str {
+        "dynamic_layout"
+    }
+
     fn title(&self) -> &str {
         "Dynamic Layout"
     }
@@ -405,13 +422,89 @@ impl DemoWindow for DynamicLayoutDemo {
 
     fn set_open(&mut self, open: bool) {
         self.open = open;
-        if !open {
-            self.layout_cache = None;
-            self.openai_geometry_cache = None;
-            self.claude_geometry_cache = None;
-            self.projection_cache = None;
-            self.projection_cache_stats = DynamicProjectionCacheStats::default();
+    }
+
+    fn warmup_status(&self) -> DemoWarmupStatus {
+        let stage = self.warmup_stage();
+        if stage == DynamicWarmupStage::Ready {
+            return DemoWarmupStatus::ready();
         }
+
+        DemoWarmupStatus::pending(
+            dynamic_warmup_stage_label(stage),
+            dynamic_warmup_stage_index(stage),
+            dynamic_warmup_stage_index(DynamicWarmupStage::Ready),
+        )
+    }
+
+    fn warmup_step(
+        &mut self,
+        _ctx: &egui::Context,
+        engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+        _budget: Duration,
+    ) -> bool {
+        self.invalidate_engine_caches_if_needed(engine);
+        let page_rect = default_warmup_page_rect();
+
+        match self.warmup_stage() {
+            DynamicWarmupStage::PrepareBody => {
+                let _ = self.ensure_body_prepared(engine);
+            }
+            DynamicWarmupStage::PrepareCredit => {
+                let _ = self.ensure_credit_width(engine);
+            }
+            DynamicWarmupStage::PrepareHulls => {
+                let _ = self.ensure_hulls();
+            }
+            DynamicWarmupStage::Layout => {
+                let layout = self.ensure_layout(page_rect, engine);
+                let _ = self.ensure_headline_prepared(engine, layout.headline_size);
+            }
+            DynamicWarmupStage::Geometries => {
+                let layout = self.ensure_layout(page_rect, engine);
+                let _ = self.frame_logo_geometries(engine, layout);
+            }
+            DynamicWarmupStage::Projection => {
+                let layout = self.ensure_layout(page_rect, engine);
+                let (openai_geometry, claude_geometry) = self.frame_logo_geometries(engine, layout);
+                let _ = self.ensure_projection(
+                    engine,
+                    layout,
+                    openai_geometry.scanlines.as_ref(),
+                    claude_geometry.scanlines.as_ref(),
+                );
+            }
+            DynamicWarmupStage::Ready => {}
+        }
+
+        self.warmup_stage() == DynamicWarmupStage::Ready
+    }
+
+    fn show_loading(
+        &mut self,
+        ctx: &egui::Context,
+        _engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+    ) {
+        let mut open = self.open;
+        let status = self.warmup_status();
+        egui::Window::new(self.title())
+            .open(&mut open)
+            .resizable(true)
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(18.0);
+                    ui.heading(self.title());
+                    ui.label("Preparing headline fit, logo geometry, and reflow caches.");
+                    ui.add_space(6.0);
+                    ui.monospace(format_warmup_status(status));
+                    ui.add_space(12.0);
+                    ui.spinner();
+                });
+            });
+        self.open = open;
     }
 
     fn show(
@@ -424,7 +517,7 @@ impl DemoWindow for DynamicLayoutDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1180.0, 1480.0))
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
             .show(ctx, |ui| {
                 let now = ctx.input(|input| input.time);
                 let animating = update_spin_state(&mut self.openai_logo, now)
@@ -583,6 +676,24 @@ impl DemoWindow for DynamicLayoutDemo {
 }
 
 impl DynamicLayoutDemo {
+    fn warmup_stage(&self) -> DynamicWarmupStage {
+        if self.projection_cache.is_some() {
+            DynamicWarmupStage::Ready
+        } else if self.openai_geometry_cache.is_some() && self.claude_geometry_cache.is_some() {
+            DynamicWarmupStage::Projection
+        } else if self.layout_cache.is_some() {
+            DynamicWarmupStage::Geometries
+        } else if self.hulls.is_some() {
+            DynamicWarmupStage::Layout
+        } else if self.body_prepared.is_some() && self.credit_width.is_some() {
+            DynamicWarmupStage::PrepareHulls
+        } else if self.body_prepared.is_some() {
+            DynamicWarmupStage::PrepareCredit
+        } else {
+            DynamicWarmupStage::PrepareBody
+        }
+    }
+
     fn invalidate_engine_caches_if_needed(&mut self, engine: &PretextEngine) {
         let revision = engine.revision();
         if self.prepared_engine_revision == Some(revision) {
@@ -826,6 +937,37 @@ impl DynamicLayoutDemo {
         );
         (openai_geometry, claude_geometry)
     }
+}
+
+fn dynamic_warmup_stage_index(stage: DynamicWarmupStage) -> usize {
+    match stage {
+        DynamicWarmupStage::PrepareBody => 0,
+        DynamicWarmupStage::PrepareCredit => 1,
+        DynamicWarmupStage::PrepareHulls => 2,
+        DynamicWarmupStage::Layout => 3,
+        DynamicWarmupStage::Geometries => 4,
+        DynamicWarmupStage::Projection => 5,
+        DynamicWarmupStage::Ready => 6,
+    }
+}
+
+fn dynamic_warmup_stage_label(stage: DynamicWarmupStage) -> &'static str {
+    match stage {
+        DynamicWarmupStage::PrepareBody => "body text",
+        DynamicWarmupStage::PrepareCredit => "credit text",
+        DynamicWarmupStage::PrepareHulls => "logo hulls",
+        DynamicWarmupStage::Layout => "page layout",
+        DynamicWarmupStage::Geometries => "logo geometry",
+        DynamicWarmupStage::Projection => "projection",
+        DynamicWarmupStage::Ready => "ready",
+    }
+}
+
+fn default_warmup_page_rect() -> Rect {
+    Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT.max(MIN_PAGE_HEIGHT)),
+    )
 }
 
 fn normal_options() -> PrepareOptions {

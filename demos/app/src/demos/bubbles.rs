@@ -244,6 +244,10 @@ impl BubblesDemo {
 }
 
 impl DemoWindow for BubblesDemo {
+    fn id(&self) -> &'static str {
+        "bubbles"
+    }
+
     fn title(&self) -> &str {
         "Bubbles"
     }

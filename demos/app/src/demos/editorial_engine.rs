@@ -22,7 +22,7 @@ use pretext_egui::{
     advanced::PretextFragmentPainter, EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
-use crate::demos::{DemoPerfStats, DemoWindow};
+use crate::demos::{format_warmup_status, DemoPerfStats, DemoWarmupStatus, DemoWindow};
 use crate::geometry::{Interval, Point, Rect as GeoRect};
 
 const HEADLINE: &str = "THE FUTURE OF TEXT\u{2002}LAYOUT IS NOT CSS";
@@ -119,6 +119,8 @@ const COMPACT_ACTIVE_ORBS: usize = 4;
 const HEADLINE_COMPACT_MAX_SIZE: i32 = 56;
 const PAGE_MIN_HEIGHT: f32 = 520.0;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const WINDOW_DEFAULT_WIDTH: f32 = 1120.0;
+const WINDOW_DEFAULT_HEIGHT: f32 = 1600.0;
 const REFLOW_BUCKET_PX: f32 = 2.0;
 const UNBOUNDED_WIDTH: f32 = 100_000.0;
 const ORB_SHADOW_1_BLUR: f32 = 60.0;
@@ -382,6 +384,20 @@ struct BodyBandPlan {
     signature: BandSlotSignature,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorialWarmupStage {
+    Orbs,
+    Body,
+    PullQuotes,
+    DropCap,
+    Layout,
+    StaticProjection,
+    BackgroundTexture,
+    OrbTextures,
+    BodyProjection,
+    Ready,
+}
+
 #[derive(Default)]
 struct EditorialBandScratch {
     blocked: Vec<Interval>,
@@ -445,6 +461,10 @@ impl Default for EditorialEngineDemo {
 }
 
 impl DemoWindow for EditorialEngineDemo {
+    fn id(&self) -> &'static str {
+        "editorial_engine"
+    }
+
     fn title(&self) -> &str {
         "Editorial Engine"
     }
@@ -461,6 +481,112 @@ impl DemoWindow for EditorialEngineDemo {
         }
     }
 
+    fn warmup_status(&self) -> DemoWarmupStatus {
+        let stage = self.warmup_stage();
+        if stage == EditorialWarmupStage::Ready {
+            return DemoWarmupStatus::ready();
+        }
+
+        DemoWarmupStatus::pending(
+            editorial_warmup_stage_label(stage),
+            editorial_warmup_stage_index(stage),
+            editorial_warmup_stage_index(EditorialWarmupStage::Ready),
+        )
+    }
+
+    fn warmup_step(
+        &mut self,
+        ctx: &egui::Context,
+        engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+        _budget: Duration,
+    ) -> bool {
+        let page = default_warmup_page();
+        let page_rect = default_warmup_page_rect();
+
+        match self.warmup_stage() {
+            EditorialWarmupStage::Orbs => {
+                self.ensure_orbs(page);
+            }
+            EditorialWarmupStage::Body => {
+                let _ = self.ensure_body_prepared(engine);
+            }
+            EditorialWarmupStage::PullQuotes => {
+                let _ = self.ensure_pull_quote_prepared(engine);
+            }
+            EditorialWarmupStage::DropCap => {
+                let _ = self.ensure_drop_cap_total_width(engine);
+            }
+            EditorialWarmupStage::Layout => {
+                let drop_cap_total_width = self.ensure_drop_cap_total_width(engine);
+                let layout = self.ensure_layout(engine, page, drop_cap_total_width);
+                let _ = self.ensure_headline_paint_style(layout.headline_fit.font_size);
+            }
+            EditorialWarmupStage::StaticProjection => {
+                let drop_cap_total_width = self.ensure_drop_cap_total_width(engine);
+                let layout = self.ensure_layout(engine, page, drop_cap_total_width);
+                self.ensure_static_projection(engine, &layout);
+            }
+            EditorialWarmupStage::BackgroundTexture => {
+                let _ = self.ensure_background_texture(
+                    ctx,
+                    [
+                        page_rect.width().round().max(1.0) as usize,
+                        page_rect.height().round().max(1.0) as usize,
+                    ],
+                );
+            }
+            EditorialWarmupStage::OrbTextures => {
+                let drop_cap_total_width = self.ensure_drop_cap_total_width(engine);
+                let layout = self.ensure_layout(engine, page, drop_cap_total_width);
+                let reduced_orb_shadow = layout.is_compact || layout.is_narrow;
+                let orb_requests = self
+                    .orbs
+                    .iter()
+                    .take(layout.active_orb_count)
+                    .map(|orb| (orb.radius * layout.orb_radius_scale, orb.rgb))
+                    .collect::<Vec<_>>();
+                for (radius, rgb) in orb_requests {
+                    let _ = self.ensure_orb_texture(ctx, radius, rgb, reduced_orb_shadow);
+                }
+            }
+            EditorialWarmupStage::BodyProjection => {
+                let drop_cap_total_width = self.ensure_drop_cap_total_width(engine);
+                let layout = self.ensure_layout(engine, page, drop_cap_total_width);
+                let _ = self.ensure_projection(engine, &layout);
+            }
+            EditorialWarmupStage::Ready => {}
+        }
+
+        self.warmup_stage() == EditorialWarmupStage::Ready
+    }
+
+    fn show_loading(
+        &mut self,
+        ctx: &egui::Context,
+        _engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+    ) {
+        let mut open = self.open;
+        let status = self.warmup_status();
+        egui::Window::new(self.title())
+            .open(&mut open)
+            .resizable(true)
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(18.0);
+                    ui.heading(self.title());
+                    ui.label("Preparing editorial layout, body projection, and GPU textures.");
+                    ui.add_space(6.0);
+                    ui.monospace(format_warmup_status(status));
+                    ui.add_space(12.0);
+                    ui.spinner();
+                });
+            });
+        self.open = open;
+    }
+
     fn show(
         &mut self,
         ctx: &egui::Context,
@@ -471,7 +597,7 @@ impl DemoWindow for EditorialEngineDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1120.0, 1600.0))
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
             .show(ctx, |ui| {
                 let now = ctx.input(|input| input.time);
                 let available = ui.available_size();
@@ -581,6 +707,30 @@ impl DemoWindow for EditorialEngineDemo {
 }
 
 impl EditorialEngineDemo {
+    fn warmup_stage(&self) -> EditorialWarmupStage {
+        if self.body_projection_cache.is_some() && self.background_texture.is_some() {
+            EditorialWarmupStage::Ready
+        } else if self.background_texture.is_some() && !self.orb_textures.is_empty() {
+            EditorialWarmupStage::BodyProjection
+        } else if self.background_texture.is_some() {
+            EditorialWarmupStage::OrbTextures
+        } else if self.static_projection_cache.is_some() {
+            EditorialWarmupStage::BackgroundTexture
+        } else if self.layout_cache.is_some() {
+            EditorialWarmupStage::StaticProjection
+        } else if self.drop_cap_total_width.is_some() {
+            EditorialWarmupStage::Layout
+        } else if self.pull_quote_prepared.is_some() {
+            EditorialWarmupStage::DropCap
+        } else if self.body_prepared.is_some() {
+            EditorialWarmupStage::PullQuotes
+        } else if !self.orbs.is_empty() {
+            EditorialWarmupStage::Body
+        } else {
+            EditorialWarmupStage::Orbs
+        }
+    }
+
     fn ensure_body_prepared(&mut self, engine: &PretextEngine) -> &PreparedTextWithSegments {
         if self.body_prepared.is_none() {
             self.body_prepared =
@@ -929,6 +1079,53 @@ impl EditorialEngineDemo {
             projection,
         });
     }
+}
+
+fn editorial_warmup_stage_index(stage: EditorialWarmupStage) -> usize {
+    match stage {
+        EditorialWarmupStage::Orbs => 0,
+        EditorialWarmupStage::Body => 1,
+        EditorialWarmupStage::PullQuotes => 2,
+        EditorialWarmupStage::DropCap => 3,
+        EditorialWarmupStage::Layout => 4,
+        EditorialWarmupStage::StaticProjection => 5,
+        EditorialWarmupStage::BackgroundTexture => 6,
+        EditorialWarmupStage::OrbTextures => 7,
+        EditorialWarmupStage::BodyProjection => 8,
+        EditorialWarmupStage::Ready => 9,
+    }
+}
+
+fn editorial_warmup_stage_label(stage: EditorialWarmupStage) -> &'static str {
+    match stage {
+        EditorialWarmupStage::Orbs => "orb positions",
+        EditorialWarmupStage::Body => "body text",
+        EditorialWarmupStage::PullQuotes => "pull quotes",
+        EditorialWarmupStage::DropCap => "drop cap",
+        EditorialWarmupStage::Layout => "page layout",
+        EditorialWarmupStage::StaticProjection => "static projection",
+        EditorialWarmupStage::BackgroundTexture => "background texture",
+        EditorialWarmupStage::OrbTextures => "orb textures",
+        EditorialWarmupStage::BodyProjection => "body projection",
+        EditorialWarmupStage::Ready => "ready",
+    }
+}
+
+fn default_warmup_page() -> GeoRect {
+    GeoRect {
+        x: 0.0,
+        y: 0.0,
+        width: WINDOW_DEFAULT_WIDTH,
+        height: WINDOW_DEFAULT_HEIGHT.max(PAGE_MIN_HEIGHT),
+    }
+}
+
+fn default_warmup_page_rect() -> Rect {
+    let page = default_warmup_page();
+    Rect::from_min_size(
+        egui::pos2(page.x, page.y),
+        egui::vec2(page.width, page.height),
+    )
 }
 
 fn clamp_texture_size_to_limit(size: [usize; 2], max_texture_side: usize) -> [usize; 2] {

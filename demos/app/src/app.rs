@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,8 @@ use pretext_egui::{
     EguiPretextRenderer, EguiPretextRendererStats,
 };
 
-use crate::demos::{self, DemoPerfStats, DemoWindow};
+use crate::demos::{self, DemoPerfStats, DemoWarmupStatus, DemoWindow};
+use crate::demos::catalog::CatalogInteraction;
 
 pub struct PretextDemoApp {
     engine: PretextEngine,
@@ -25,6 +27,8 @@ pub struct PretextDemoApp {
     last_interaction_at: Instant,
     perf_hud_visible: bool,
     perf_hud: PerfHudState,
+    demo_warmup_frame: DemoWarmupFrameStats,
+    demo_lifecycle: HashMap<&'static str, DemoLifecycleRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,6 +65,24 @@ struct PerfHudState {
     last_demo_frame: DemoPerfStats,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct DemoWarmupFrameStats {
+    step_count: usize,
+    pending_open: usize,
+    pending_background: usize,
+    active_demo: Option<&'static str>,
+    active_stage: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DemoLifecycleRecord {
+    was_open: bool,
+    ready_once: bool,
+    awaiting_ready_since: Option<Instant>,
+    first_open_ready_ms: Option<f32>,
+    last_reopen_ready_ms: Option<f32>,
+}
+
 impl PretextDemoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let now = Instant::now();
@@ -83,6 +105,8 @@ impl PretextDemoApp {
             last_interaction_at: now,
             perf_hud_visible: true,
             perf_hud: PerfHudState::default(),
+            demo_warmup_frame: DemoWarmupFrameStats::default(),
+            demo_lifecycle: HashMap::new(),
         }
     }
 
@@ -104,6 +128,8 @@ impl PretextDemoApp {
             last_interaction_at: now,
             perf_hud_visible: false,
             perf_hud: PerfHudState::default(),
+            demo_warmup_frame: DemoWarmupFrameStats::default(),
+            demo_lifecycle: HashMap::new(),
         }
     }
 
@@ -119,9 +145,10 @@ impl PretextDemoApp {
         let frame_start = Instant::now();
         self.note_interaction(ctx);
         self.try_swap_in_system_engine();
-        self.maybe_start_system_font_scan(ctx);
         self.ensure_root_viewport_visible(ctx);
+        self.demo_warmup_frame = DemoWarmupFrameStats::default();
 
+        let mut catalog_interaction = CatalogInteraction::default();
         egui::SidePanel::left("catalog")
             .resizable(true)
             .default_width(220.0)
@@ -129,12 +156,20 @@ impl PretextDemoApp {
                 ui.heading("Pretext");
                 ui.label("Rust + egui baseline");
                 ui.separator();
-                demos::catalog::show_catalog(ui, &mut self.demos);
+                catalog_interaction = demos::catalog::show_catalog(ui, &mut self.demos);
                 ui.separator();
                 ui.label(format!("Sample lines: {}", self.sample_line_count));
                 ui.label(self.system_font_status_label());
+                if !self.system_fonts_ready && self.system_engine_rx.is_none() {
+                    if ui.button("Load system fonts").clicked() {
+                        self.system_engine_rx = Some(spawn_system_font_engine());
+                    }
+                }
                 ui.checkbox(&mut self.perf_hud_visible, "Show perf HUD");
             });
+
+        self.run_hover_warmup(ctx, catalog_interaction);
+        self.run_open_demo_warmups(ctx, catalog_interaction);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Workspace Baseline");
@@ -143,8 +178,21 @@ impl PretextDemoApp {
 
         for demo in &mut self.demos {
             if demo.is_open() {
-                demo.show(ctx, &self.engine, &mut self.assets);
+                if demo.warmup_status().ready {
+                    demo.show(ctx, &self.engine, &mut self.assets);
+                } else {
+                    demo.show_loading(ctx, &self.engine, &mut self.assets);
+                }
             }
+        }
+
+        self.update_demo_lifecycle();
+
+        if self.demo_warmup_frame.pending_open > 0
+            || self.demo_warmup_frame.pending_background > 0
+            || self.system_engine_rx.is_some()
+        {
+            ctx.request_repaint();
         }
         self.maybe_tick_atlas_warmup(ctx);
         let demo_perf = self.demos.iter().filter(|demo| demo.is_open()).fold(
@@ -194,23 +242,6 @@ impl PretextDemoApp {
         }
     }
 
-    fn maybe_start_system_font_scan(&mut self, ctx: &egui::Context) {
-        if self.system_fonts_ready {
-            return;
-        }
-
-        ctx.request_repaint_after(SYSTEM_FONT_IDLE_POLL_INTERVAL);
-        if self.system_engine_rx.is_some() {
-            return;
-        }
-
-        if self.last_interaction_at.elapsed() < SYSTEM_FONT_IDLE_DELAY {
-            return;
-        }
-
-        self.system_engine_rx = Some(spawn_system_font_engine());
-    }
-
     fn try_swap_in_system_engine(&mut self) {
         let Some(rx) = &self.system_engine_rx else {
             return;
@@ -230,7 +261,118 @@ impl PretextDemoApp {
         } else if self.system_engine_rx.is_some() {
             "System fonts: indexing in background..."
         } else {
-            "System fonts: pending idle scan"
+            "System fonts: bundled-only"
+        }
+    }
+
+    fn run_hover_warmup(&mut self, ctx: &egui::Context, interaction: CatalogInteraction) {
+        let Some(hovered_demo_id) = interaction.hovered_demo_id else {
+            return;
+        };
+
+        let Some(index) = self
+            .demos
+            .iter()
+            .position(|demo| demo.id() == hovered_demo_id && !demo.is_open())
+        else {
+            return;
+        };
+
+        let status = self.demos[index].warmup_status();
+        if status.ready {
+            return;
+        }
+
+        self.demo_warmup_frame.pending_background += 1;
+        let _ = self.warm_demo(index, ctx, BACKGROUND_DEMO_WARMUP_BUDGET);
+    }
+
+    fn run_open_demo_warmups(&mut self, ctx: &egui::Context, interaction: CatalogInteraction) {
+        let frame_deadline = Instant::now() + OPEN_DEMO_WARMUP_BUDGET;
+        let prioritized = interaction
+            .opened_demo_id
+            .and_then(|opened_demo_id| self.demos.iter().position(|demo| demo.id() == opened_demo_id));
+        let mut pending_indices = Vec::new();
+
+        if let Some(index) = prioritized {
+            if self.demos[index].is_open() && !self.demos[index].warmup_status().ready {
+                pending_indices.push(index);
+            }
+        }
+
+        for (index, demo) in self.demos.iter().enumerate() {
+            if Some(index) == prioritized {
+                continue;
+            }
+            if demo.is_open() && !demo.warmup_status().ready {
+                pending_indices.push(index);
+            }
+        }
+
+        self.demo_warmup_frame.pending_open = pending_indices.len();
+        for index in pending_indices {
+            let remaining = frame_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let _ = self.warm_demo(index, ctx, remaining);
+        }
+    }
+
+    fn warm_demo(&mut self, index: usize, ctx: &egui::Context, budget: Duration) -> DemoWarmupStatus {
+        let id = self.demos[index].id();
+        let status = self.demos[index].warmup_status();
+        if self.demo_warmup_frame.active_demo.is_none() {
+            self.demo_warmup_frame.active_demo = Some(id);
+            self.demo_warmup_frame.active_stage = status.stage;
+        }
+        self.demo_warmup_frame.step_count += 1;
+        let _ = self.demos[index].warmup_step(ctx, &self.engine, &mut self.assets, budget);
+        self.demos[index].warmup_status()
+    }
+
+    fn update_demo_lifecycle(&mut self) {
+        let now = Instant::now();
+        for demo in &self.demos {
+            let status = demo.warmup_status();
+            let record = self.demo_lifecycle.entry(demo.id()).or_default();
+            let is_open = demo.is_open();
+
+            if !record.was_open && is_open {
+                if status.ready {
+                    if record.ready_once {
+                        record.last_reopen_ready_ms = Some(0.0);
+                    } else {
+                        record.first_open_ready_ms = Some(0.0);
+                        record.ready_once = true;
+                    }
+                    record.awaiting_ready_since = None;
+                } else {
+                    record.awaiting_ready_since = Some(now);
+                }
+            }
+
+            if is_open && !status.ready && record.awaiting_ready_since.is_none() {
+                record.awaiting_ready_since = Some(now);
+            }
+
+            if is_open && status.ready {
+                if let Some(started) = record.awaiting_ready_since.take() {
+                    let ready_ms = now.duration_since(started).as_secs_f32() * 1000.0;
+                    if record.ready_once {
+                        record.last_reopen_ready_ms = Some(ready_ms);
+                    } else {
+                        record.first_open_ready_ms = Some(ready_ms);
+                        record.ready_once = true;
+                    }
+                }
+            }
+
+            if !is_open {
+                record.awaiting_ready_since = None;
+            }
+
+            record.was_open = is_open;
         }
     }
 
@@ -257,6 +399,36 @@ impl PretextDemoApp {
             .show(ctx, |ui| {
                 ui.label(format!("Frame EMA: {:.2} ms", self.perf_hud.frame_time_ms_ema));
                 ui.label(self.system_font_status_label());
+                ui.label(format!(
+                    "Demo warmup/frame: steps={} open_pending={} background_pending={}",
+                    self.demo_warmup_frame.step_count,
+                    self.demo_warmup_frame.pending_open,
+                    self.demo_warmup_frame.pending_background,
+                ));
+                if let Some(active_demo) = self.demo_warmup_frame.active_demo {
+                    ui.label(format!(
+                        "Warmup target: {} ({})",
+                        active_demo, self.demo_warmup_frame.active_stage
+                    ));
+                }
+                if let Some((demo_id, record)) = self
+                    .demo_lifecycle
+                    .iter()
+                    .find(|(_, record)| record.first_open_ready_ms.is_some() || record.last_reopen_ready_ms.is_some())
+                {
+                    let first_open = record
+                        .first_open_ready_ms
+                        .map(|value| format!("{value:.1} ms"))
+                        .unwrap_or_else(|| "-".to_owned());
+                    let reopen = record
+                        .last_reopen_ready_ms
+                        .map(|value| format!("{value:.1} ms"))
+                        .unwrap_or_else(|| "-".to_owned());
+                    ui.label(format!(
+                        "Warmup telemetry: {} first={} reopen={}",
+                        demo_id, first_open, reopen
+                    ));
+                }
                 ui.separator();
                 ui.label(format!(
                     "Engine/frame: prepare={} prepare+seg={} layout={} layout+lines={} layout+runs={} next_line={} next_line+glyph={} next_line+runs={} visual_runs={} glyph_runs={} line_runs={} prefix_widths={} shape_spans={}",
@@ -475,7 +647,8 @@ const SAMPLE_TEXT: &str = "The engine API is wired into the demo shell.";
 const SAMPLE_WIDTH: f32 = 180.0;
 const SAMPLE_LINE_HEIGHT: f32 = 22.0;
 const SYSTEM_FONT_IDLE_DELAY: Duration = Duration::from_millis(1_500);
-const SYSTEM_FONT_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const OPEN_DEMO_WARMUP_BUDGET: Duration = Duration::from_millis(8);
+const BACKGROUND_DEMO_WARMUP_BUDGET: Duration = Duration::from_millis(3);
 const ATLAS_WARMUP_GLYPH_BUDGET: usize = 24;
 const ATLAS_WARMUP_PAGE_BUDGET: usize = 6;
 

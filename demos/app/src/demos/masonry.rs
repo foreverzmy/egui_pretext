@@ -125,6 +125,10 @@ struct MasonryPlacementBuilder {
 }
 
 impl DemoWindow for MasonryDemo {
+    fn id(&self) -> &'static str {
+        "masonry"
+    }
+
     fn title(&self) -> &str {
         "Masonry"
     }

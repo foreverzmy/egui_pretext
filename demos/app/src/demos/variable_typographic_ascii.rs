@@ -16,7 +16,7 @@ use pretext_egui::{
 };
 use pretext_render::{BaselineMode, TextRasterRequest, TextRenderCache};
 
-use crate::demos::DemoWindow;
+use crate::demos::{format_warmup_status, DemoWarmupStatus, DemoWindow};
 
 const COLS: usize = 50;
 const ROWS: usize = 28;
@@ -60,6 +60,8 @@ const CREDIT: &str = "Made by @somnai_dreams";
 const SOURCE_FIELD_LABEL: &str = "Source Field";
 const PROPORTIONAL_LABEL: &str = "Proportional × 3 Weights × Italic";
 const MONOSPACE_LABEL: &str = "Monospace × Single Weight";
+const WINDOW_DEFAULT_WIDTH: f32 = 1080.0;
+const WINDOW_DEFAULT_HEIGHT: f32 = 1520.0;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const FRAME_DT_SECONDS: f32 = 1.0 / 60.0;
@@ -71,6 +73,7 @@ const PROP_COLOR_RGB: [u8; 3] = [196, 163, 90];
 const WINDOW_BG_TOP: Color32 = Color32::from_rgb(10, 10, 18);
 const WINDOW_BG_BOTTOM: Color32 = Color32::from_rgb(6, 6, 10);
 const WINDOW_STROKE: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 18);
+const PALETTE_WARMUP_BATCH: usize = 12;
 
 pub struct VariableTypographicAsciiDemo {
     open: bool,
@@ -83,9 +86,26 @@ pub struct VariableTypographicAsciiDemo {
     brightness_field: Vec<f32>,
     stamps: Stamps,
     palette: Option<PaletteCache>,
+    palette_builder: Option<PaletteWarmupState>,
     palette_engine_revision: Option<u64>,
     rows: Vec<RowRender>,
     source_texture: Option<SizedTexture>,
+}
+
+struct PaletteWarmupState {
+    engine_revision: u64,
+    raster_cache: TextRenderCache,
+    variants: Vec<VariantStyle>,
+    chars: Vec<char>,
+    mono_chars: Vec<char>,
+    variant_index: usize,
+    char_index: usize,
+    mono_index: usize,
+    entries: Vec<PaletteEntry>,
+    mono_entries: Vec<MonoPaletteEntry>,
+    prop_space_width: f32,
+    mono_style: TextStyleSpec,
+    mono_cell_width: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -255,6 +275,7 @@ impl Default for VariableTypographicAsciiDemo {
             brightness_field: vec![0.0; FIELD_COLS * FIELD_ROWS],
             stamps,
             palette: None,
+            palette_builder: None,
             palette_engine_revision: None,
             rows: Vec::new(),
             source_texture: None,
@@ -265,6 +286,10 @@ impl Default for VariableTypographicAsciiDemo {
 }
 
 impl DemoWindow for VariableTypographicAsciiDemo {
+    fn id(&self) -> &'static str {
+        "variable_typographic_ascii"
+    }
+
     fn title(&self) -> &str {
         TITLE
     }
@@ -278,6 +303,89 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         if !open {
             self.last_time = None;
         }
+    }
+
+    fn warmup_status(&self) -> DemoWarmupStatus {
+        if self.palette.is_some() {
+            return DemoWarmupStatus::ready();
+        }
+
+        if let Some(builder) = &self.palette_builder {
+            return DemoWarmupStatus::pending(
+                palette_warmup_stage_label(builder),
+                palette_warmup_completed(builder),
+                palette_warmup_total(builder),
+            );
+        }
+
+        DemoWarmupStatus::pending("palette glyphs", 0, palette_warmup_total_from_static())
+    }
+
+    fn warmup_step(
+        &mut self,
+        _ctx: &egui::Context,
+        engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+        _budget: Duration,
+    ) -> bool {
+        self.invalidate_palette_if_needed(engine);
+        if self.palette.is_some() {
+            return true;
+        }
+
+        if self.palette_builder.is_none() {
+            self.palette_builder = Some(PaletteWarmupState::new(engine));
+        }
+
+        let builder = self
+            .palette_builder
+            .as_mut()
+            .expect("palette warmup builder should exist");
+        builder.step(engine, PALETTE_WARMUP_BATCH);
+
+        if builder.is_ready_to_finalize() {
+            let builder = self
+                .palette_builder
+                .take()
+                .expect("palette warmup builder should exist");
+            self.palette = Some(builder.finalize());
+            self.palette_engine_revision = Some(engine.revision());
+            self.rows.clear();
+        }
+
+        self.palette.is_some()
+    }
+
+    fn show_loading(
+        &mut self,
+        ctx: &egui::Context,
+        _engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+    ) {
+        let mut open = self.open;
+        let window_frame = egui::Frame::window(ctx.style().as_ref())
+            .fill(WINDOW_BG_TOP)
+            .stroke(Stroke::new(1.0, WINDOW_STROKE))
+            .corner_radius(CornerRadius::same(18));
+        let status = self.warmup_status();
+        egui::Window::new(self.title())
+            .open(&mut open)
+            .resizable(true)
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
+            .frame(window_frame)
+            .show(ctx, |ui| {
+                paint_window_background(ui.painter(), ui.max_rect());
+                ui.vertical_centered(|ui| {
+                    ui.add_space(18.0);
+                    ui.heading(self.title());
+                    ui.label("Preparing proportional and monospace glyph palettes.");
+                    ui.add_space(6.0);
+                    ui.monospace(format_warmup_status(status));
+                    ui.add_space(12.0);
+                    ui.spinner();
+                });
+            });
+        self.open = open;
     }
 
     fn show(
@@ -294,11 +402,16 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         egui::Window::new(self.title())
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(1080.0, 1520.0))
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
             .frame(window_frame)
             .show(ctx, |ui| {
                 paint_window_background(ui.painter(), ui.max_rect());
-                self.refresh_palette_if_needed(engine);
+                self.invalidate_palette_if_needed(engine);
+                #[cfg(test)]
+                if self.palette.is_none() {
+                    self.palette = Some(build_palette(engine));
+                    self.palette_engine_revision = Some(engine.revision());
+                }
                 self.update(ctx.input(|input| input.time));
 
                 let palette = self
@@ -423,14 +536,21 @@ impl DemoWindow for VariableTypographicAsciiDemo {
 }
 
 impl VariableTypographicAsciiDemo {
-    fn refresh_palette_if_needed(&mut self, engine: &PretextEngine) {
+    fn invalidate_palette_if_needed(&mut self, engine: &PretextEngine) {
         let revision = engine.revision();
-        if self.palette_engine_revision == Some(revision) && self.palette.is_some() {
+        if self.palette_engine_revision == Some(revision)
+            || self
+                .palette_builder
+                .as_ref()
+                .is_some_and(|builder| builder.engine_revision == revision)
+        {
             return;
         }
 
-        self.palette = Some(build_palette(engine));
-        self.palette_engine_revision = Some(revision);
+        self.palette = None;
+        self.palette_builder = None;
+        self.palette_engine_revision = None;
+        self.rows.clear();
     }
 
     fn update(&mut self, now: f64) {
@@ -550,6 +670,163 @@ impl VariableTypographicAsciiDemo {
     }
 }
 
+impl PaletteWarmupState {
+    fn new(engine: &PretextEngine) -> Self {
+        let mono_style = mono_style();
+        Self {
+            engine_revision: engine.revision(),
+            raster_cache: TextRenderCache::default(),
+            variants: build_variants(),
+            chars: charset_chars(),
+            mono_chars: MONO_RAMP.chars().collect(),
+            variant_index: 0,
+            char_index: 0,
+            mono_index: 0,
+            entries: Vec::new(),
+            mono_entries: Vec::new(),
+            prop_space_width: measure_text_width(engine, " ", &prop_base_style()).max(1.0),
+            mono_cell_width: measure_char_width(engine, '0', &mono_style).max(1.0),
+            mono_style,
+        }
+    }
+
+    fn step(&mut self, engine: &PretextEngine, budget: usize) {
+        let mut processed = 0usize;
+        while processed < budget && self.variant_index < self.variants.len() {
+            let ch = self.chars[self.char_index];
+            let variant = &self.variants[self.variant_index];
+            let width = measure_char_width(engine, ch, &variant.style);
+            if width > 0.0 {
+                let brightness =
+                    estimate_brightness(engine, &mut self.raster_cache, ch, &variant.style, width);
+                let mut buffer = [0u8; 4];
+                let glyph_runs =
+                    single_line_glyph_runs(engine, ch.encode_utf8(&mut buffer), &variant.style);
+                self.entries.push(PaletteEntry {
+                    text: ch.to_string(),
+                    variant_index: self.variant_index,
+                    width,
+                    brightness,
+                    glyph_runs,
+                });
+            }
+
+            self.char_index += 1;
+            if self.char_index == self.chars.len() {
+                self.char_index = 0;
+                self.variant_index += 1;
+            }
+            processed += 1;
+        }
+
+        while processed < budget && self.variant_index >= self.variants.len() && self.mono_index < self.mono_chars.len() {
+            let ch = self.mono_chars[self.mono_index];
+            let mut buffer = [0u8; 4];
+            self.mono_entries.push(MonoPaletteEntry {
+                ch,
+                text: ch.to_string(),
+                glyph_runs: single_line_glyph_runs(
+                    engine,
+                    ch.encode_utf8(&mut buffer),
+                    &self.mono_style,
+                ),
+            });
+            self.mono_index += 1;
+            processed += 1;
+        }
+    }
+
+    fn is_ready_to_finalize(&self) -> bool {
+        self.variant_index >= self.variants.len() && self.mono_index >= self.mono_chars.len()
+    }
+
+    fn finalize(mut self) -> PaletteCache {
+        let max_brightness = self
+            .entries
+            .iter()
+            .map(|entry| entry.brightness)
+            .fold(0.0f32, f32::max);
+        if max_brightness > 0.0 {
+            for entry in &mut self.entries {
+                entry.brightness /= max_brightness;
+            }
+        }
+        self.entries
+            .sort_by(|left, right| left.brightness.total_cmp(&right.brightness));
+
+        let mono_chars = self
+            .mono_entries
+            .iter()
+            .map(|entry| entry.ch)
+            .collect::<Vec<_>>();
+        let mut lookup = [BrightnessEntry::default(); 256];
+        for brightness_byte in 0..=255u16 {
+            let brightness = brightness_byte as f32 / 255.0;
+            let mono_index =
+                ((brightness * mono_chars.len() as f32).floor() as usize).min(mono_chars.len() - 1);
+            let mono_char = mono_chars[mono_index];
+            lookup[brightness_byte as usize] = if brightness < 0.03 {
+                BrightnessEntry {
+                    mono_char,
+                    mono_palette_index: mono_index as u8,
+                    prop: PropLookup::Blank,
+                }
+            } else {
+                let palette_index = find_best_entry(&self.entries, brightness, TARGET_CELL_W);
+                let alpha_step = (brightness * 10.0).round().clamp(1.0, 10.0) as u8;
+                BrightnessEntry {
+                    mono_char,
+                    mono_palette_index: mono_index as u8,
+                    prop: PropLookup::Glyph {
+                        palette_index,
+                        alpha_step,
+                    },
+                }
+            };
+        }
+
+        PaletteCache {
+            variants: self.variants,
+            entries: self.entries,
+            mono_entries: self.mono_entries,
+            lookup,
+            prop_space_width: self.prop_space_width,
+            mono_style: self.mono_style,
+            mono_cell_width: self.mono_cell_width,
+            mono_row_width: self.mono_cell_width * COLS as f32,
+        }
+    }
+}
+
+fn charset_chars() -> Vec<char> {
+    CHARSET.chars().filter(|ch| *ch != ' ').collect()
+}
+
+fn palette_warmup_total(builder: &PaletteWarmupState) -> usize {
+    builder.variants.len() * builder.chars.len() + builder.mono_chars.len() + 1
+}
+
+fn palette_warmup_total_from_static() -> usize {
+    build_variants().len() * charset_chars().len() + MONO_RAMP.chars().count() + 1
+}
+
+fn palette_warmup_completed(builder: &PaletteWarmupState) -> usize {
+    let variant_work = builder.variant_index * builder.chars.len() + builder.char_index;
+    let mono_work = builder.mono_index;
+    let finalize_work = usize::from(builder.is_ready_to_finalize());
+    variant_work + mono_work + finalize_work
+}
+
+fn palette_warmup_stage_label(builder: &PaletteWarmupState) -> &'static str {
+    if builder.variant_index < builder.variants.len() {
+        "palette glyphs"
+    } else if builder.mono_index < builder.mono_chars.len() {
+        "mono glyphs"
+    } else {
+        "lookup table"
+    }
+}
+
 impl DeterministicRng {
     fn new(seed: u64) -> Self {
         Self { state: seed.max(1) }
@@ -577,6 +854,7 @@ impl Stamps {
     }
 }
 
+#[cfg(test)]
 fn build_palette(engine: &PretextEngine) -> PaletteCache {
     let mut raster_cache = TextRenderCache::default();
     let prop_space_width = measure_text_width(engine, " ", &prop_base_style()).max(1.0);

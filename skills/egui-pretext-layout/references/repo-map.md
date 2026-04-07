@@ -125,7 +125,9 @@ Use this file as the pattern for:
 - constructing and retaining `EguiPretextRenderer`
 - bootstrapping bundled demo fonts
 - priming fonts
+- scheduling demo warmup steps and loading shells
 - scheduling atlas warmup
+- controlling system-font loading without surprise cache invalidation
 - showing perf HUD counters
 
 ## Demo patterns
@@ -170,6 +172,7 @@ Read this for:
 - height measurement before paint
 - viewport virtualization without DOM reads
 - ordered visible-range materialization
+- staged cold-start warmup for template prep and the default conversation frame
 
 ### `demos/app/src/demos/masonry.rs`
 
@@ -193,6 +196,7 @@ Read this for:
 
 - mixed styles on positioned runs
 - glyph-aware visual treatments where text is part of a custom scene
+- incremental palette warmup instead of synchronous first-open palette builds
 
 ### `demos/app/src/demos/dynamic_layout.rs`
 
@@ -202,6 +206,7 @@ Read this for:
 - `layout_next_line_with_runs`
 - `PretextFragmentPainter` inside a custom paint pipeline
 - mixing SVG-driven geometry, demo assets, and text reflow
+- staged warmup of text prep, hulls, layout, geometry, and projection
 
 ### `demos/app/src/demos/editorial_engine.rs`
 
@@ -212,6 +217,7 @@ Read this for the most advanced flow pattern:
 - obstacle bucketing
 - separating animation updates from relayout triggers
 - explicit body-column planning
+- staged warmup of static text/layout state, textures, and dynamic body projection
 
 Use this file whenever a task sounds like "text should continue around or between things."
 

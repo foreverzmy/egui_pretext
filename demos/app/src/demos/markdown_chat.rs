@@ -1,5 +1,6 @@
 use std::iter::Peekable;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use eframe::egui;
 use egui::{
@@ -26,7 +27,7 @@ use pretext_egui::{
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use crate::demos::DemoWindow;
+use crate::demos::{format_warmup_status, DemoWarmupStatus, DemoWindow};
 
 const PAGE_FILL: Color32 = Color32::from_rgb(51, 55, 64);
 const PANEL_FILL: Color32 = Color32::from_rgb(51, 55, 64);
@@ -169,6 +170,12 @@ struct InlinePieceSpec {
 struct MarkdownChatSeed {
     role: ChatRole,
     markdown: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct ParsedChatTemplateSeed {
+    role: ChatRole,
+    blocks: Vec<BlockNode>,
 }
 
 #[derive(Clone, Debug)]
@@ -364,8 +371,16 @@ pub struct MarkdownChatDemo {
     open: bool,
     show_virtualization_mask: bool,
     requested_chat_width: f32,
+    templates_builder: Option<PreparedTemplatesBuilder>,
     templates_state: Option<PreparedTemplatesState>,
     frame_cache: Option<ConversationFrameCache>,
+}
+
+#[derive(Clone)]
+struct PreparedTemplatesBuilder {
+    engine_revision: u64,
+    next_template_index: usize,
+    templates: Vec<PreparedChatTemplate>,
 }
 
 impl Default for MarkdownChatDemo {
@@ -374,6 +389,7 @@ impl Default for MarkdownChatDemo {
             open: false,
             show_virtualization_mask: false,
             requested_chat_width: DEFAULT_CHAT_WIDTH,
+            templates_builder: None,
             templates_state: None,
             frame_cache: None,
         }
@@ -381,6 +397,10 @@ impl Default for MarkdownChatDemo {
 }
 
 impl DemoWindow for MarkdownChatDemo {
+    fn id(&self) -> &'static str {
+        "markdown_chat"
+    }
+
     fn title(&self) -> &str {
         "Markdown Chat"
     }
@@ -390,6 +410,116 @@ impl DemoWindow for MarkdownChatDemo {
     }
 
     fn set_open(&mut self, open: bool) {
+        self.open = open;
+    }
+
+    fn warmup_status(&self) -> DemoWarmupStatus {
+        if self.frame_cache.is_some() {
+            return DemoWarmupStatus::ready();
+        }
+
+        if let Some(builder) = &self.templates_builder {
+            return DemoWarmupStatus::pending(
+                "templates",
+                builder.next_template_index,
+                BASE_MESSAGE_SPECS.len() + 1,
+            );
+        }
+
+        if self.templates_state.is_some() {
+            return DemoWarmupStatus::pending(
+                "conversation frame",
+                BASE_MESSAGE_SPECS.len(),
+                BASE_MESSAGE_SPECS.len() + 1,
+            );
+        }
+
+        DemoWarmupStatus::pending("templates", 0, BASE_MESSAGE_SPECS.len() + 1)
+    }
+
+    fn warmup_step(
+        &mut self,
+        _ctx: &egui::Context,
+        engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+        _budget: Duration,
+    ) -> bool {
+        self.invalidate_cached_state_if_needed(engine);
+
+        if self.templates_state.is_none() {
+            let builder = self
+                .templates_builder
+                .get_or_insert_with(|| PreparedTemplatesBuilder {
+                    engine_revision: engine.revision(),
+                    next_template_index: 0,
+                    templates: Vec::with_capacity(BASE_MESSAGE_SPECS.len()),
+                });
+            if builder.next_template_index < BASE_MESSAGE_SPECS.len() {
+                let parsed = &parsed_template_seeds()[builder.next_template_index];
+                builder.templates.push(PreparedChatTemplate {
+                    role: parsed.role,
+                    blocks: prepare_markdown_nodes(engine, &parsed.blocks),
+                });
+                builder.next_template_index += 1;
+            }
+            if builder.next_template_index == BASE_MESSAGE_SPECS.len() {
+                let builder = self
+                    .templates_builder
+                    .take()
+                    .expect("markdown template builder should exist");
+                self.templates_state = Some(PreparedTemplatesState {
+                    engine_revision: builder.engine_revision,
+                    templates: builder.templates,
+                });
+            }
+            return self.warmup_status().ready;
+        }
+
+        if self.default_frame_cache_ready(engine) {
+            return true;
+        }
+
+        let chat_width = default_warmup_chat_width();
+        let occlusion_banner_height = default_warmup_occlusion_banner_height();
+        let templates = &self
+            .templates_state
+            .as_ref()
+            .expect("markdown templates should exist before frame warmup")
+            .templates;
+        self.frame_cache = Some(ConversationFrameCache {
+            engine_revision: engine.revision(),
+            chat_width_q: quantize(chat_width),
+            occlusion_banner_height_q: quantize(occlusion_banner_height),
+            frame: build_conversation_frame(engine, templates, chat_width, occlusion_banner_height),
+        });
+        true
+    }
+
+    fn show_loading(
+        &mut self,
+        ctx: &egui::Context,
+        _engine: &PretextEngine,
+        _assets: &mut EguiPretextRenderer,
+    ) {
+        let mut open = self.open;
+        let status = self.warmup_status();
+        egui::Window::new(self.title())
+            .open(&mut open)
+            .resizable(true)
+            .default_size(egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT))
+            .show(ctx, |ui| {
+                ui.painter()
+                    .rect_filled(ui.max_rect(), CornerRadius::ZERO, PAGE_FILL);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(24.0);
+                    ui.heading(self.title());
+                    ui.label("Preparing markdown templates and the virtualized conversation frame.");
+                    ui.add_space(6.0);
+                    ui.monospace(format_warmup_status(status));
+                    ui.add_space(12.0);
+                    ui.spinner();
+                });
+            });
         self.open = open;
     }
 
@@ -412,6 +542,41 @@ impl DemoWindow for MarkdownChatDemo {
 }
 
 impl MarkdownChatDemo {
+    fn invalidate_cached_state_if_needed(&mut self, engine: &PretextEngine) {
+        let engine_revision = engine.revision();
+        if self
+            .templates_state
+            .as_ref()
+            .is_some_and(|state| state.engine_revision != engine_revision)
+        {
+            self.templates_state = None;
+            self.frame_cache = None;
+        }
+        if self
+            .templates_builder
+            .as_ref()
+            .is_some_and(|builder| builder.engine_revision != engine_revision)
+        {
+            self.templates_builder = None;
+        }
+        if self
+            .frame_cache
+            .as_ref()
+            .is_some_and(|cache| cache.engine_revision != engine_revision)
+        {
+            self.frame_cache = None;
+        }
+    }
+
+    fn default_frame_cache_ready(&self, engine: &PretextEngine) -> bool {
+        self.frame_cache.as_ref().is_some_and(|cache| {
+            cache.engine_revision == engine.revision()
+                && cache.chat_width_q == quantize(default_warmup_chat_width())
+                && cache.occlusion_banner_height_q
+                    == quantize(default_warmup_occlusion_banner_height())
+        })
+    }
+
     fn render_page(
         &mut self,
         ui: &mut egui::Ui,
@@ -456,22 +621,16 @@ impl MarkdownChatDemo {
     }
 
     fn ensure_prepared_templates(&mut self, engine: &PretextEngine) -> &[PreparedChatTemplate] {
-        let engine_revision = engine.revision();
-        if self
-            .templates_state
-            .as_ref()
-            .is_some_and(|state| state.engine_revision != engine_revision)
-        {
-            self.templates_state = None;
-            self.frame_cache = None;
-        }
+        self.invalidate_cached_state_if_needed(engine);
 
         if self.templates_state.is_none() {
+            let engine_revision = engine.revision();
             let templates = BASE_MESSAGE_SPECS
                 .iter()
-                .map(|seed| PreparedChatTemplate {
-                    role: seed.role,
-                    blocks: prepare_markdown_blocks(engine, seed.markdown),
+                .zip(parsed_template_seeds().iter())
+                .map(|(_seed, parsed)| PreparedChatTemplate {
+                    role: parsed.role,
+                    blocks: prepare_markdown_nodes(engine, &parsed.blocks),
                 })
                 .collect();
             self.templates_state = Some(PreparedTemplatesState {
@@ -493,6 +652,7 @@ impl MarkdownChatDemo {
         chat_width: f32,
         occlusion_banner_height: f32,
     ) -> &ConversationFrame {
+        self.invalidate_cached_state_if_needed(engine);
         let engine_revision = engine.revision();
         let chat_width_q = quantize(chat_width);
         let occlusion_banner_height_q = quantize(occlusion_banner_height);
@@ -608,6 +768,14 @@ impl MarkdownChatDemo {
                 }
             });
     }
+}
+
+fn default_warmup_chat_width() -> f32 {
+    DEFAULT_CHAT_WIDTH
+}
+
+fn default_warmup_occlusion_banner_height() -> f32 {
+    get_occlusion_banner_height(CHAT_BODY_DEFAULT_HEIGHT)
 }
 
 fn paint_header(ui: &mut egui::Ui) {
@@ -1565,8 +1733,28 @@ fn fragment_overlay_options(style: &TextStyleSpec, line_height: f32) -> EmojiOve
     }
 }
 
+#[cfg(test)]
 fn prepare_markdown_blocks(engine: &PretextEngine, markdown: &str) -> Vec<PreparedBlock> {
-    build_blocks_from_nodes(engine, &parse_markdown(markdown), ParseContext::default())
+    prepare_markdown_nodes(engine, &parse_markdown(markdown))
+}
+
+fn prepare_markdown_nodes(engine: &PretextEngine, nodes: &[BlockNode]) -> Vec<PreparedBlock> {
+    build_blocks_from_nodes(engine, nodes, ParseContext::default())
+}
+
+fn parsed_template_seeds() -> &'static [ParsedChatTemplateSeed] {
+    static SEEDS: OnceLock<Vec<ParsedChatTemplateSeed>> = OnceLock::new();
+    SEEDS
+        .get_or_init(|| {
+            BASE_MESSAGE_SPECS
+                .iter()
+                .map(|seed| ParsedChatTemplateSeed {
+                    role: seed.role,
+                    blocks: parse_markdown(seed.markdown),
+                })
+                .collect()
+        })
+        .as_slice()
 }
 
 fn parse_markdown(markdown: &str) -> Vec<BlockNode> {

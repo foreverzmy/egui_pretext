@@ -107,6 +107,10 @@ impl Default for DragonThroughTextDemo {
 }
 
 impl DemoWindow for DragonThroughTextDemo {
+    fn id(&self) -> &'static str {
+        "dragon_through_text"
+    }
+
     fn title(&self) -> &str {
         "Dragon Through Text"
     }

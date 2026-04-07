@@ -308,6 +308,10 @@ const INLINE_SPECS: &[RichInlineSpec] = &[
 ];
 
 impl DemoWindow for RichNoteDemo {
+    fn id(&self) -> &'static str {
+        "rich_note"
+    }
+
     fn title(&self) -> &str {
         "Rich Text"
     }
