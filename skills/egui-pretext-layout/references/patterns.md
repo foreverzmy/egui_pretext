@@ -17,8 +17,12 @@ Prefer current public names in new code:
 | Need full paragraph layout with visual or glyph runs | `prepared.layout(...)` or `engine.layout_paragraph(...)` | reconstructing runs later |
 | Need inline-only rich text with mixed styles, atomic items, boundary whitespace collapse, or extra chrome | `pretext::rich_inline::*` | hand-rolled inline flow in `egui` or repeated `layout_next_line*` glue code |
 | Need stable lines as strings and widths without full run payloads | `pretext::advanced::layout_lines(...)` | manual splitting in `egui` |
+| Need aggregate line geometry for one known width | `prepared.measure_line_geometry(...)` or `pretext::advanced::measure_line_geometry(...)` | walking every line just to recover `line_count` or `max_line_width` |
+| Need natural unwrapped width | `prepared.measure_natural_width(...)` or `pretext::advanced::measure_natural_width(...)` | fake infinite-width layout probes unless you truly need per-line callbacks |
 | Need width search or inspect every line width | `walk_line_ranges` | repeatedly calling full render paths |
+| Need exact line ranges without line text or run payloads | `prepared.layout_next_line_range(...)` or `pretext::advanced::layout_next_line_range(...)` | full line or run materialization |
 | Need continuation across slots or columns | `layout_next_line*` with `pretext::advanced::LayoutCursor` | slicing rendered text afterward |
+| Need visual or glyph runs for one known line | `engine.line_visual_runs(...)`, `engine.line_glyph_runs(...)`, or `engine.line_runs(...)` | recomputing the whole paragraph layout when you already have `LayoutLine` |
 | Need an unbreakable inline element | `prepare_atomic_placeholder` | embedding fake spaces or punctuation |
 | Need per-grapheme offsets | `prefix_widths` | guessing from byte indices |
 | Need no-space CJK-led text to stay cohesive | `WordBreakMode::KeepAll` | hard-coded punctuation merges in app code |
@@ -59,11 +63,20 @@ Read `accordion.rs` before implementing this pattern.
 ## Recipe: Shrinkwrap Bubble or Caption
 
 1. Prepare text once.
-2. Use `walk_line_ranges` to inspect line widths.
-3. Search widths until line count changes, or compute the max line width directly for the current wrap result.
-4. Size the bubble from text geometry, then paint the paragraph.
+2. If the width is fixed and you only need aggregate geometry, start with `prepared.measure_line_geometry(...)`.
+3. Use `walk_line_ranges` only when you are searching widths or need every line width.
+4. Search widths until line count changes, or compute the max line width directly for the current wrap result.
+5. Size the bubble from text geometry, then paint the paragraph.
 
 Read `bubbles.rs` before implementing this pattern.
+
+## Recipe: Reuse Existing Lines but Add Runs
+
+1. Generate or cache `LayoutLine` values with `prepared.layout(...)`, `pretext::advanced::layout_lines(...)`, or `layout_next_line*`.
+2. Materialize `engine.line_visual_runs(...)`, `engine.line_glyph_runs(...)`, or `engine.line_runs(...)` only for the lines you are about to inspect or paint.
+3. Feed those runs into positioned-run painting, overlay placement, or custom metrics logic.
+
+Use this when line geometry is already cached and a second full paragraph layout would be redundant.
 
 ## Recipe: Inline Chip or Non-Breaking Embedded Item
 
@@ -151,6 +164,8 @@ If a bug feels random, first check whether one of these boundaries is too coarse
 - Hand-writing `PretextParagraphOptions` field lists instead of using `..Default::default()`, then drifting when fields such as `word_break` change
 - Using `egui` text widgets when later code needs line widths or cursor continuation
 - Choosing `prepared.layout(...)` when only total height is needed
+- Using `walk_line_ranges` when `measure_line_geometry(...)` or `measure_natural_width(...)` already answers the question
+- Recomputing full paragraph layout when `line_runs(...)` on an existing `LayoutLine` is enough
 - Forgetting to quantize widths or obstacle positions, causing relayout churn
 - Hiding fallback behavior and then wondering why some text disappears on atlas misses
 - Using `rasterize_text_texture(...)` as the default paragraph renderer

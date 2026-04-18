@@ -28,9 +28,12 @@ Read this when lower-level text flow is actually required:
 - `prepare_text`
 - `measure_text`
 - `layout_lines`
+- `measure_line_geometry`
+- `measure_natural_width`
+- `layout_next_line_range`
 - shaping and font exports
 
-Use this file for cursor-driven continuation, low-level line payloads, custom shaping inspection, or debugging.
+Use this file for cursor-driven continuation, range-only streaming, line-only geometry helpers, low-level line payloads, custom shaping inspection, or debugging.
 
 ### `crates/pretext/src/rich_inline.rs`
 
@@ -50,8 +53,10 @@ Read this when behavior depends on cache keys, cursor advancement, paragraph con
 Use this file to understand:
 
 - `prepare_paragraph`, `measure_paragraph`, `layout_paragraph`
+- `measure_line_geometry`, `measure_natural_width`
 - `walk_line_ranges`
 - `layout_next_line`, `layout_next_line_with_glyph_runs`, `layout_next_line_with_runs`
+- `line_visual_runs`, `line_glyph_runs`, `line_runs`
 - `prepare_atomic_placeholder`
 - `prefix_widths`
 - paragraph cache bucketing and runtime stats
@@ -228,12 +233,12 @@ Read this when text must interact with a moving visual object and glyph runs mus
 ## How to choose a reference quickly
 
 - Need a standard paragraph widget or measured disclosure content: start with `accordion.rs`
-- Need plain paragraph geometry or shrinkwrap: start with `bubbles.rs`
+- Need plain paragraph geometry or shrinkwrap: start with `bubbles.rs`; use `crates/pretext/src/engine.rs` first if aggregate geometry helpers may be enough
 - Need height-only card measurement: start with `masonry.rs`
 - Need inline-only rich flow primitives: start with `crates/pretext/src/rich_inline.rs`
 - Need markdown-like chat bubbles or virtualized rich messages: start with `markdown_chat.rs`
 - Need inline chips or mixed text fragments: start with `rich_note.rs`
-- Need explicit positioned runs: start with `justification_algorithms.rs`
+- Need explicit positioned runs or per-line run extraction: start with `justification_algorithms.rs` and `crates/pretext/src/engine.rs`
 - Need obstacle-aware or animated wrap: start with `dynamic_layout.rs`
 - Need cursor-driven multi-column flow: start with `editorial_engine.rs`
 - Need text reacting to a moving visual object: start with `dragon_through_text.rs`

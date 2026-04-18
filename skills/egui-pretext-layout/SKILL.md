@@ -1,6 +1,6 @@
 ---
 name: egui-pretext-layout
-description: Implement, review, and refactor Rust UI code that combines egui containers, interaction, and painting with pretext paragraph preparation, measurement, layout, rich inline flow, or custom text rendering. Use when a task involves choosing between the stable root APIs (`prepare_paragraph`, `PretextPreparedParagraph::measure/layout`, `EguiPretextRenderer`), the inline-only helper (`pretext::rich_inline`), and the advanced modules (`pretext::advanced`, `pretext_egui::advanced`); building custom paragraphs, shrinkwrap bubbles, markdown-ish chat surfaces, inline atomic placeholders, obstacle-aware reflow, multi-column text flow, glyph-run painting, atlas warmup, shaped-text textures, or demo-asset bootstrapping in this pretext workspace.
+description: Implement, review, and refactor Rust UI code that combines egui containers, interaction, and painting with pretext paragraph preparation, measurement, layout, rich inline flow, line geometry, or custom text rendering. Use when a task involves choosing between the stable root APIs (`prepare_paragraph`, `PretextPreparedParagraph::measure/layout/measure_line_geometry`, `EguiPretextRenderer`), the inline-only helper (`pretext::rich_inline`), and the advanced modules (`pretext::advanced`, `pretext_egui::advanced`); building custom paragraphs, shrinkwrap bubbles, markdown-ish chat surfaces, inline atomic placeholders, obstacle-aware reflow, multi-column text flow, per-line run extraction, glyph-run painting, atlas warmup, shaped-text textures, or demo-asset bootstrapping in this pretext workspace.
 ---
 
 # egui + pretext Layout
@@ -10,12 +10,12 @@ Use this skill to separate responsibilities cleanly:
 - Use `egui` for windows, panels, input, animation timing, scroll areas, texture placement, and generic widgets.
 - Use `pretext` root exports for standard paragraph preparation, measurement, and layout.
 - Use `pretext::rich_inline` for inline-only mixed-style flow, boundary whitespace collapse, atomic inline items, or extra inline chrome.
-- Use `pretext::advanced` only when the task needs cursor-driven continuation, low-level line payloads, shaping details, or font internals.
+- Use `pretext::advanced` only when the task needs cursor-driven continuation, range-only streaming, aggregate geometry helpers, low-level line payloads, shaping details, or font internals.
 - Use `pretext_egui` root exports for stable paragraph rendering, text textures, and renderer stats.
 - Use `pretext_egui::advanced` for positioned runs, fragment painters, glyph-scene helpers, emoji overlays, or atlas warmup.
 - Use `pretext_egui::experimental::demo_assets` only for demo and test asset bootstrapping in this workspace.
 
-If the task is mostly chrome or standard widgets, stay in `egui`. If the task needs exact line structure, cursor progression, wrap decisions, or obstacle-aware text flow, move the text logic into `pretext` early.
+If the task is mostly chrome or standard widgets, stay in `egui`. If the task needs exact line structure, line geometry, cursor progression, wrap decisions, or obstacle-aware text flow, move the text logic into `pretext` early.
 
 ## Workflow
 
@@ -36,8 +36,11 @@ If the task is mostly chrome or standard widgets, stay in `egui`. If the task ne
    - Standard paragraph layout with visual and glyph runs: `prepared.layout(...)` or `layout_paragraph(...)`
    - Inline-only mixed-style flow with atomic spans or extra chrome: `pretext::rich_inline::*`
    - Stable lines without full run payloads: `pretext::advanced::layout_lines(...)`
-   - Width search or bounds inspection: `walk_line_ranges`
-   - Incremental flow, obstacles, or multi-column continuation: `layout_next_line*` with `pretext::advanced::LayoutCursor`
+   - Aggregate geometry for a known width or natural width: `prepared.measure_line_geometry(...)`, `prepared.measure_natural_width(...)`, or `pretext::advanced::{measure_line_geometry, measure_natural_width}`
+   - Width search or inspect every line width across a wrap result: `walk_line_ranges`
+   - Range-only continuation without line text or run materialization: `layout_next_line_range(...)` with `pretext::advanced::LayoutCursor`
+   - Incremental flow, obstacles, or multi-column continuation with materialized text or runs: `layout_next_line*` with `pretext::advanced::LayoutCursor`
+   - Materialize visual or glyph runs for one existing `LayoutLine`: `line_visual_runs(...)`, `line_glyph_runs(...)`, or `line_runs(...)`
    - Non-breaking inline box: `prepare_atomic_placeholder`
    - Per-grapheme geometry or overlay alignment: `prefix_widths`
    - When constructing `PretextParagraphOptions`, prefer `..Default::default()` unless the task explicitly needs non-default `white_space`, `word_break`, or `paragraph_direction`
@@ -67,7 +70,9 @@ If the task is mostly chrome or standard widgets, stay in `egui`. If the task ne
 - Do not import outdated names from older commits such as `AssetRegistry`, `PretextParagraph`, or hidden root `layout_with_*` entry points in new code.
 - Do not recreate `EguiPretextRenderer` per frame.
 - Do not default to `egui::Label` or `Painter::text` if later logic needs line geometry.
+- Do not use `walk_line_ranges` when `measure_line_geometry` or `measure_natural_width` already answers the question.
 - Do not default to `rasterize_text_texture` for paragraph rendering when atlas-backed glyph runs already fit the case.
+- Do not recompute a whole paragraph layout if a cached `LayoutLine` plus `line_runs(...)` already gives the run data you need.
 - Do not mix interaction state and text layout state in one opaque cache; keep them separable.
 - Do not hand-write `PretextParagraphOptions` field lists unless you really need all of them; prefer `..Default::default()` so new fields such as `word_break` do not make examples stale.
 - Do not recompute `prepare_paragraph` inside hot inner loops unless the text actually changed.
