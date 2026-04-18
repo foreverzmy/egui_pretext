@@ -966,7 +966,10 @@ fn dynamic_warmup_stage_label(stage: DynamicWarmupStage) -> &'static str {
 fn default_warmup_page_rect() -> Rect {
     Rect::from_min_size(
         egui::Pos2::ZERO,
-        egui::vec2(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT.max(MIN_PAGE_HEIGHT)),
+        egui::vec2(
+            WINDOW_DEFAULT_WIDTH,
+            WINDOW_DEFAULT_HEIGHT.max(MIN_PAGE_HEIGHT),
+        ),
     )
 }
 

@@ -147,6 +147,12 @@ pub struct LayoutResult {
     pub line_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LineGeometry {
+    pub line_count: usize,
+    pub max_line_width: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutWithLinesResult {
     pub height: f32,
@@ -405,6 +411,24 @@ impl PreparedTextWithSegments {
         line_height: f32,
     ) -> LayoutWithRunsResult {
         engine.layout_paragraph(self, max_width, line_height)
+    }
+
+    pub fn measure_line_geometry(&self, engine: &PretextEngine, max_width: f32) -> LineGeometry {
+        layout::measure_line_geometry(self, max_width, engine.para_cache.as_ref())
+    }
+
+    pub fn measure_natural_width(&self, engine: &PretextEngine) -> f32 {
+        layout::measure_natural_width(self, engine.para_cache.as_ref())
+    }
+
+    pub fn layout_next_line_range(
+        &self,
+        engine: &PretextEngine,
+        start: &mut LayoutCursor,
+        max_width: f32,
+    ) -> Option<LayoutLineRange> {
+        layout::layout_next_line_range(self, start, max_width, engine.para_cache.as_ref())
+            .map(|(range, _)| range)
     }
 }
 
@@ -1139,6 +1163,22 @@ mod tests {
         lines
     }
 
+    fn collect_streamed_ranges(
+        engine: &PretextEngine,
+        prepared: &PreparedTextWithSegments,
+        width: f32,
+        start: LayoutCursor,
+    ) -> Vec<LayoutLineRange> {
+        let mut lines = Vec::new();
+        let mut cursor = start;
+
+        while let Some(line) = prepared.layout_next_line_range(engine, &mut cursor, width) {
+            lines.push(line);
+        }
+
+        lines
+    }
+
     fn collect_streamed_lines_with_widths(
         engine: &PretextEngine,
         prepared: &PreparedTextWithSegments,
@@ -1521,6 +1561,61 @@ mod tests {
 
         assert!(batched.lines.len() >= 3);
         assert_eq!(streamed, batched.lines);
+    }
+
+    #[test]
+    fn line_geometry_helpers_match_existing_layout_interfaces() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared = engine.prepare_with_segments(
+            "Hello 世界 مرحبا 🌍 test",
+            &style,
+            &PrepareOptions::default(),
+        );
+        let width = 80.0;
+        let batched = engine.layout_with_lines(&prepared, width, 22.0);
+        let expected_max_width = batched
+            .lines
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0, f32::max);
+
+        let geometry = prepared.measure_line_geometry(&engine, width);
+        let advanced_geometry = crate::advanced::measure_line_geometry(&engine, &prepared, width);
+        let natural_width = prepared.measure_natural_width(&engine);
+        let advanced_natural_width = crate::advanced::measure_natural_width(&engine, &prepared);
+        let walked_natural_width = engine.walk_line_ranges(&prepared, f32::INFINITY, |_| {});
+
+        assert_eq!(geometry.line_count, batched.line_count);
+        assert_eq!(advanced_geometry, geometry);
+        assert!((geometry.max_line_width - expected_max_width).abs() <= 0.05);
+        assert!((natural_width - walked_natural_width).abs() <= 0.05);
+        assert!((advanced_natural_width - natural_width).abs() <= 0.05);
+    }
+
+    #[test]
+    fn layout_next_line_range_matches_materialized_line_boundaries() {
+        let engine = bundled_engine();
+        let style = bundled_style();
+        let prepared =
+            engine.prepare_with_segments("foo 世界 bar baz", &style, &PrepareOptions::default());
+        let width = total_width(&engine, "foo 世", &style) + 0.1;
+        let expected = engine.layout_with_lines(&prepared, width, 22.0);
+        let ranges = collect_streamed_ranges(&engine, &prepared, width, LayoutCursor::default());
+
+        assert_eq!(ranges.len(), expected.lines.len());
+        for (range, line) in ranges.iter().zip(expected.lines.iter()) {
+            assert_eq!(range.start, line.start);
+            assert_eq!(range.end, line.end);
+            assert!((range.width - line.width).abs() <= 0.05);
+        }
+
+        let mut cursor = LayoutCursor::default();
+        let advanced_first =
+            crate::advanced::layout_next_line_range(&engine, &prepared, &mut cursor, width)
+                .expect("advanced wrapper should yield the first line range");
+        assert_eq!(advanced_first, ranges[0]);
+        assert_eq!(cursor, ranges[0].end);
     }
 
     #[test]

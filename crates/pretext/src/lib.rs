@@ -28,7 +28,7 @@ pub use crate::engine::{
     EngineRuntimeStats, LayoutLineGlyphRun as PretextGlyphRun,
     LayoutLineVisualRun as PretextVisualRun, LayoutLineWithRuns as PretextLine,
     LayoutResult as PretextParagraphMetrics, LayoutWithRunsResult as PretextParagraphLayout,
-    PrepareOptions as PretextParagraphOptions,
+    LineGeometry as PretextLineGeometry, PrepareOptions as PretextParagraphOptions,
     PreparedTextWithSegments as PretextPreparedParagraph, PretextEngine, PretextEngineBuilder,
     TextStyleSpec as PretextStyle,
 };

@@ -197,6 +197,7 @@ pub(crate) fn is_cjk_char(ch: char) -> bool {
             | 0x3000..=0x303F
             | 0x3040..=0x309F
             | 0x30A0..=0x30FF
+            | 0x3130..=0x318F
             | 0xAC00..=0xD7AF
             | 0xFF00..=0xFFEF
     )
@@ -562,6 +563,7 @@ fn should_merge_text_piece(
     }
 
     !next.word_like
+        && !contains_cjk_text(previous_text)
         && (is_left_sticky_punctuation_segment(next_text)
             || (next_text == "-" && previous.word_like))
 }
@@ -575,6 +577,7 @@ fn merge_escaped_quote_clusters_into_previous(
         let merge = pieces[index].kind == AnalysisSegmentKind::Text
             && !pieces[index].word_like
             && pieces[index - 1].kind == AnalysisSegmentKind::Text
+            && !contains_cjk_text(slice_text(normalized, &pieces[index - 1].byte_range))
             && is_escaped_quote_cluster_segment(slice_text(normalized, &pieces[index].byte_range));
 
         if merge {
@@ -1443,6 +1446,52 @@ mod tests {
     }
 
     #[test]
+    fn segmentation_treats_hangul_compatibility_jamo_as_cjk_units() {
+        assert_eq!(
+            segment_texts("ㅋㅋㅋ 진짜", WhiteSpaceMode::Normal),
+            vec![
+                "ㅋ".to_owned(),
+                "ㅋ".to_owned(),
+                "ㅋ".to_owned(),
+                " ".to_owned(),
+                "진".to_owned(),
+                "짜".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn segmentation_keeps_cjk_opening_brackets_with_following_annotations() {
+        assert_eq!(
+            segment_texts("서울(Seoul)과", WhiteSpaceMode::Normal),
+            vec![
+                "서".to_owned(),
+                "울".to_owned(),
+                "(Seoul)".to_owned(),
+                "과".to_owned()
+            ]
+        );
+        assert_eq!(
+            segment_texts("東京(Tokyo)と", WhiteSpaceMode::Normal),
+            vec![
+                "東".to_owned(),
+                "京".to_owned(),
+                "(Tokyo)".to_owned(),
+                "と".to_owned()
+            ]
+        );
+        assert_eq!(
+            segment_texts("참조[1]와", WhiteSpaceMode::Normal),
+            vec![
+                "참".to_owned(),
+                "조".to_owned(),
+                "[1]".to_owned(),
+                "와".to_owned()
+            ]
+        );
+    }
+
+    #[test]
     fn locale_can_change_word_boundaries() {
         assert_eq!(
             segment_texts_with_locale("EU:ssä", WhiteSpaceMode::Normal, None),
@@ -1499,7 +1548,8 @@ mod tests {
     }
 
     #[test]
-    fn is_cjk_covers_newer_extension_blocks() {
+    fn is_cjk_covers_hangul_compatibility_jamo_and_newer_extension_blocks() {
+        assert!(is_cjk("ㅋ"));
         assert!(is_cjk("\u{2EBF0}"));
         assert!(is_cjk("\u{31350}"));
         assert!(is_cjk("\u{323B0}"));

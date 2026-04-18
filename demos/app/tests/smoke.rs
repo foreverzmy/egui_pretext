@@ -26,7 +26,11 @@ fn heavy_demo_warmups_reach_ready_state() {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             app.update_headless(ctx);
         });
-        if app.demos_mut().iter().all(|demo| demo.warmup_status().ready) {
+        if app
+            .demos_mut()
+            .iter()
+            .all(|demo| demo.warmup_status().ready)
+        {
             return;
         }
     }
@@ -79,7 +83,11 @@ fn heavy_demo_reopen_keeps_warm_caches() {
             demo.id(),
             "markdown_chat" | "dynamic_layout" | "editorial_engine" | "variable_typographic_ascii"
         ) {
-            assert!(demo.warmup_status().ready, "{} should be warm before close", demo.id());
+            assert!(
+                demo.warmup_status().ready,
+                "{} should be warm before close",
+                demo.id()
+            );
             demo.set_open(false);
             demo.set_open(true);
             assert!(

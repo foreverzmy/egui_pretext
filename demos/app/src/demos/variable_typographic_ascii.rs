@@ -719,7 +719,10 @@ impl PaletteWarmupState {
             processed += 1;
         }
 
-        while processed < budget && self.variant_index >= self.variants.len() && self.mono_index < self.mono_chars.len() {
+        while processed < budget
+            && self.variant_index >= self.variants.len()
+            && self.mono_index < self.mono_chars.len()
+        {
             let ch = self.mono_chars[self.mono_index];
             let mut buffer = [0u8; 4];
             self.mono_entries.push(MonoPaletteEntry {

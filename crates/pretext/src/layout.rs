@@ -11,7 +11,7 @@ use crate::bidi::paragraph_to_bidi_runs;
 use crate::engine::{
     GraphemeMeta, LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineGlyphRun, LayoutLineRange,
     LayoutLineRuns, LayoutLineVisualRun, LayoutLineWithGlyphRuns, LayoutLineWithRuns, LayoutResult,
-    LayoutWithLinesResult, LayoutWithRunsResult, PrepareOptions, PreparedText,
+    LayoutWithLinesResult, LayoutWithRunsResult, LineGeometry, PrepareOptions, PreparedText,
     PreparedTextWithSegments, Segment, SegmentKind, SegmentMeta, TextStyleSpec,
 };
 use crate::font_catalog::FontCatalog;
@@ -249,6 +249,31 @@ pub(crate) fn walk_line_ranges(
     }
 
     max_line_width
+}
+
+pub(crate) fn measure_line_geometry(
+    prepared: &PreparedTextWithSegments,
+    max_width: f32,
+    cache: Option<&ParagraphCache>,
+) -> LineGeometry {
+    let paragraph = paragraph_layout(prepared.inner(), max_width, cache);
+    let mut max_line_width = 0.0f32;
+
+    for line in paragraph.lines.iter() {
+        max_line_width = max_line_width.max(line.range.width);
+    }
+
+    LineGeometry {
+        line_count: paragraph.lines.len(),
+        max_line_width,
+    }
+}
+
+pub(crate) fn measure_natural_width(
+    prepared: &PreparedTextWithSegments,
+    cache: Option<&ParagraphCache>,
+) -> f32 {
+    measure_line_geometry(prepared, f32::INFINITY, cache).max_line_width
 }
 
 pub(crate) fn layout_with_lines(

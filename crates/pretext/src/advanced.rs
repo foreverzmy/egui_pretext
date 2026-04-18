@@ -10,7 +10,8 @@ use crate::{
 
 pub use crate::engine::{
     LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineRange, LayoutLineRuns,
-    LayoutLineWithGlyphRuns, LayoutWithLinesResult, PreparedText, SegmentKind, ShapedTextSpan,
+    LayoutLineWithGlyphRuns, LayoutWithLinesResult, LineGeometry, PreparedText, SegmentKind,
+    ShapedTextSpan,
 };
 pub use crate::font_catalog::{FontId, LoadedFace};
 pub use crate::line_break::BreakOpportunity;
@@ -41,4 +42,25 @@ pub fn layout_lines(
     line_height: f32,
 ) -> LayoutWithLinesResult {
     engine.layout_with_lines(prepared, max_width, line_height)
+}
+
+pub fn measure_line_geometry(
+    engine: &PretextEngine,
+    prepared: &PretextPreparedParagraph,
+    max_width: f32,
+) -> LineGeometry {
+    prepared.measure_line_geometry(engine, max_width)
+}
+
+pub fn measure_natural_width(engine: &PretextEngine, prepared: &PretextPreparedParagraph) -> f32 {
+    prepared.measure_natural_width(engine)
+}
+
+pub fn layout_next_line_range(
+    engine: &PretextEngine,
+    prepared: &PretextPreparedParagraph,
+    start: &mut LayoutCursor,
+    max_width: f32,
+) -> Option<LayoutLineRange> {
+    prepared.layout_next_line_range(engine, start, max_width)
 }

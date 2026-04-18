@@ -1,0 +1,6 @@
+interface:
+  display_name: "Pretext Upstream Sync"
+  short_description: "Sync pretext_js submodule and map Rust follow-ups"
+  default_prompt: "Use $pretext-upstream-sync to move the pretext_js submodule to the right upstream commit, record that gitlink in this repo, and recommend what Rust should borrow or align."
+policy:
+  allow_implicit_invocation: true

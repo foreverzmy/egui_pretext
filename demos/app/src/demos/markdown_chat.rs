@@ -513,7 +513,9 @@ impl DemoWindow for MarkdownChatDemo {
                 ui.vertical_centered(|ui| {
                     ui.add_space(24.0);
                     ui.heading(self.title());
-                    ui.label("Preparing markdown templates and the virtualized conversation frame.");
+                    ui.label(
+                        "Preparing markdown templates and the virtualized conversation frame.",
+                    );
                     ui.add_space(6.0);
                     ui.monospace(format_warmup_status(status));
                     ui.add_space(12.0);

@@ -13,8 +13,8 @@ use pretext_egui::{
     EguiPretextRenderer, EguiPretextRendererStats,
 };
 
-use crate::demos::{self, DemoPerfStats, DemoWarmupStatus, DemoWindow};
 use crate::demos::catalog::CatalogInteraction;
+use crate::demos::{self, DemoPerfStats, DemoWarmupStatus, DemoWindow};
 
 pub struct PretextDemoApp {
     engine: PretextEngine,
@@ -289,9 +289,11 @@ impl PretextDemoApp {
 
     fn run_open_demo_warmups(&mut self, ctx: &egui::Context, interaction: CatalogInteraction) {
         let frame_deadline = Instant::now() + OPEN_DEMO_WARMUP_BUDGET;
-        let prioritized = interaction
-            .opened_demo_id
-            .and_then(|opened_demo_id| self.demos.iter().position(|demo| demo.id() == opened_demo_id));
+        let prioritized = interaction.opened_demo_id.and_then(|opened_demo_id| {
+            self.demos
+                .iter()
+                .position(|demo| demo.id() == opened_demo_id)
+        });
         let mut pending_indices = Vec::new();
 
         if let Some(index) = prioritized {
@@ -319,7 +321,12 @@ impl PretextDemoApp {
         }
     }
 
-    fn warm_demo(&mut self, index: usize, ctx: &egui::Context, budget: Duration) -> DemoWarmupStatus {
+    fn warm_demo(
+        &mut self,
+        index: usize,
+        ctx: &egui::Context,
+        budget: Duration,
+    ) -> DemoWarmupStatus {
         let id = self.demos[index].id();
         let status = self.demos[index].warmup_status();
         if self.demo_warmup_frame.active_demo.is_none() {

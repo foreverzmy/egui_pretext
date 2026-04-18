@@ -1,0 +1,3 @@
+[submodule "pretext_js"]
+	path = pretext_js
+	url = https://github.com/chenglou/pretext.git
