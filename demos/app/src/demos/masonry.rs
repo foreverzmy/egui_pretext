@@ -795,7 +795,7 @@ mod tests {
         let mut demo = MasonryDemo::default();
         demo.set_open(true);
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
 
@@ -814,13 +814,13 @@ mod tests {
         let mut demo = MasonryDemo::default();
         demo.set_open(true);
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let after_first = engine.runtime_stats();
         let asset_after_first = assets.stats();
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let after_second = engine.runtime_stats();

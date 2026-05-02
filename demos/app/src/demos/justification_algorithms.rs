@@ -1635,7 +1635,7 @@ mod tests {
         let mut demo = JustificationAlgorithmsDemo::default();
         demo.set_open(true);
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let stats = assets.stats();

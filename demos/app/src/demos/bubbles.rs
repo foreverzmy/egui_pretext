@@ -913,10 +913,10 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input(), |ctx| {
+        let _ = ctx.run_ui(raw_input(), |ctx| {
             demo.show_window(ctx, &engine, &mut assets);
         });
-        let output = ctx.run(raw_input(), |ctx| {
+        let output = ctx.run_ui(raw_input(), |ctx| {
             demo.show_window(ctx, &engine, &mut assets);
         });
         let stats = assets.stats();
@@ -978,7 +978,7 @@ mod tests {
             .glyph_runs
             .clone();
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("bubbles-glyph-atlas-first"),
@@ -998,7 +998,7 @@ mod tests {
         });
         let after_first = assets.stats();
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("bubbles-glyph-atlas-second"),

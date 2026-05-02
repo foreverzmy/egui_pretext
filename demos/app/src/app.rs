@@ -138,21 +138,29 @@ impl PretextDemoApp {
     }
 
     pub fn update_headless(&mut self, ctx: &egui::Context) {
-        self.render(ctx);
+        let mut ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new((ctx.viewport_id(), "pretext_headless_root")),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(ctx.content_rect()),
+        );
+        self.render(&mut ui);
     }
 
-    fn render(&mut self, ctx: &egui::Context) {
+    fn render(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let frame_start = Instant::now();
-        self.note_interaction(ctx);
+        self.note_interaction(&ctx);
         self.try_swap_in_system_engine();
-        self.ensure_root_viewport_visible(ctx);
+        self.ensure_root_viewport_visible(&ctx);
         self.demo_warmup_frame = DemoWarmupFrameStats::default();
 
         let mut catalog_interaction = CatalogInteraction::default();
-        egui::SidePanel::left("catalog")
+        egui::Panel::left("catalog")
             .resizable(true)
-            .default_width(220.0)
-            .show(ctx, |ui| {
+            .default_size(220.0)
+            .show_inside(ui, |ui| {
                 ui.heading("Pretext");
                 ui.label("Rust + egui baseline");
                 ui.separator();
@@ -168,10 +176,10 @@ impl PretextDemoApp {
                 ui.checkbox(&mut self.perf_hud_visible, "Show perf HUD");
             });
 
-        self.run_hover_warmup(ctx, catalog_interaction);
-        self.run_open_demo_warmups(ctx, catalog_interaction);
+        self.run_hover_warmup(&ctx, catalog_interaction);
+        self.run_open_demo_warmups(&ctx, catalog_interaction);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading("Workspace Baseline");
             ui.label("Catalog lives in the left panel. Open demos there.");
         });
@@ -179,9 +187,9 @@ impl PretextDemoApp {
         for demo in &mut self.demos {
             if demo.is_open() {
                 if demo.warmup_status().ready {
-                    demo.show(ctx, &self.engine, &mut self.assets);
+                    demo.show(&ctx, &self.engine, &mut self.assets);
                 } else {
-                    demo.show_loading(ctx, &self.engine, &mut self.assets);
+                    demo.show_loading(&ctx, &self.engine, &mut self.assets);
                 }
             }
         }
@@ -194,7 +202,7 @@ impl PretextDemoApp {
         {
             ctx.request_repaint();
         }
-        self.maybe_tick_atlas_warmup(ctx);
+        self.maybe_tick_atlas_warmup(&ctx);
         let demo_perf = self.demos.iter().filter(|demo| demo.is_open()).fold(
             DemoPerfStats::default(),
             |acc, demo| {
@@ -219,7 +227,7 @@ impl PretextDemoApp {
             demo_perf,
         );
         if self.perf_hud_visible {
-            self.show_perf_hud(ctx);
+            self.show_perf_hud(&ctx);
         }
     }
 
@@ -509,8 +517,8 @@ impl PretextDemoApp {
 }
 
 impl eframe::App for PretextDemoApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.render(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render(ui);
     }
 }
 
@@ -944,10 +952,10 @@ mod tests {
 
         assert_eq!(cached, compute_sample_line_count(&app.engine));
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.update_headless(ctx);
         });
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.update_headless(ctx);
         });
 

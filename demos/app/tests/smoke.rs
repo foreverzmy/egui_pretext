@@ -9,7 +9,7 @@ fn all_demos_open_without_panic() {
         demo.set_open(true);
     }
 
-    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+    let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
         app.update_headless(ctx);
     });
 }
@@ -23,7 +23,7 @@ fn heavy_demo_warmups_reach_ready_state() {
     }
 
     for _ in 0..96 {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.update_headless(ctx);
         });
         if app
@@ -57,7 +57,7 @@ fn heavy_demo_reopen_keeps_warm_caches() {
     }
 
     for _ in 0..96 {
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.update_headless(ctx);
         });
         if app

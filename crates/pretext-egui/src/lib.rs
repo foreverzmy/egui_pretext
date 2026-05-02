@@ -987,7 +987,7 @@ mod tests {
         experimental::demo_assets::install_demo_fonts(&ctx);
 
         let mut probe = None;
-        let _ = ctx.run(RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(RawInput::default(), |ctx| {
             let font_id = FontId::new(16.0, FontFamily::Proportional);
             probe = Some(ctx.fonts_mut(|fonts| {
                 (
@@ -1176,7 +1176,7 @@ mod tests {
         let desired_width = 180.0;
         let mut response_rect = None;
 
-        let output = ctx.run(
+        let output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1185,7 +1185,7 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show_inside(ctx, |ui| {
                     let response = ui.add(
                         EguiPretextParagraph::new(&layout, &style, 22.0, &engine, &mut assets)
                             .color(egui::Color32::WHITE)
@@ -1234,7 +1234,7 @@ mod tests {
             .color(egui::Color32::WHITE)
             .fallback_align(egui::Align2::LEFT_TOP);
 
-        let output = ctx.run(
+        let output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1307,7 +1307,7 @@ mod tests {
         let glyph_runs_body = &first_body_line.runs.glyph_runs;
         let glyph_runs_mono = &first_mono_line.runs.glyph_runs;
 
-        let output = ctx.run(
+        let output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1370,7 +1370,7 @@ mod tests {
         let style = default_style();
         let mut painted = false;
 
-        let output = ctx.run(
+        let output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1432,7 +1432,7 @@ mod tests {
 
         let mut fallback_count = None;
         let mut painted = false;
-        let output = ctx.run(
+        let output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1512,7 +1512,7 @@ mod tests {
 
         let mut fallback_count = None;
         let mut overlay_count = None;
-        let _ = ctx.run(RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(RawInput::default(), |ctx| {
             let options = EguiPretextPaintOptions::new(&style, 22.0)
                 .color(egui::Color32::WHITE)
                 .fallback_font(FontId::new(style.size_px, FontFamily::Proportional))
@@ -1559,7 +1559,7 @@ mod tests {
         let y = 32.0;
         let line_bottom = y + 22.0;
 
-        let output = ctx.run(
+        let output = ctx.run_ui(
             RawInput {
                 screen_rect: Some(Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1628,7 +1628,7 @@ mod tests {
         let first_line = &layout.lines[0];
         let glyph_runs = &first_line.runs.glyph_runs;
 
-        let _ = ctx.run(RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(RawInput::default(), |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("glyph-atlas-first"),
@@ -1649,7 +1649,7 @@ mod tests {
         let entries_after_first = assets.glyph_atlas_entry_count();
         let uploads_after_first = assets.stats().texture_uploads;
 
-        let _ = ctx.run(RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(RawInput::default(), |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("glyph-atlas-second"),

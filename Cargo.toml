@@ -14,8 +14,8 @@ version = "0.1.0"
 
 [workspace.dependencies]
 # GUI
-eframe = "0.33.3"
-egui = "0.33.3"
+eframe = "0.34.1"
+egui = "0.34.1"
 
 # Font shaping / font discovery
 rustybuzz = "0.20.1"

@@ -1241,10 +1241,10 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = ctx.run(raw_input(0.0), |ctx| {
+        let _ = ctx.run_ui(raw_input(0.0), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
-        let output = ctx.run(raw_input(1.0), |ctx| {
+        let output = ctx.run_ui(raw_input(1.0), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let stats = assets.stats();

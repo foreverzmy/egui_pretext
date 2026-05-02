@@ -363,7 +363,7 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         _assets: &mut EguiPretextRenderer,
     ) {
         let mut open = self.open;
-        let window_frame = egui::Frame::window(ctx.style().as_ref())
+        let window_frame = egui::Frame::window(ctx.global_style().as_ref())
             .fill(WINDOW_BG_TOP)
             .stroke(Stroke::new(1.0, WINDOW_STROKE))
             .corner_radius(CornerRadius::same(18));
@@ -395,7 +395,7 @@ impl DemoWindow for VariableTypographicAsciiDemo {
         assets: &mut EguiPretextRenderer,
     ) {
         let mut open = self.open;
-        let window_frame = egui::Frame::window(ctx.style().as_ref())
+        let window_frame = egui::Frame::window(ctx.global_style().as_ref())
             .fill(WINDOW_BG_TOP)
             .stroke(Stroke::new(1.0, WINDOW_STROKE))
             .corner_radius(CornerRadius::same(18));
@@ -1648,7 +1648,7 @@ mod tests {
         let mut demo = VariableTypographicAsciiDemo::default();
         demo.set_open(true);
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             demo.show(ctx, &engine, &mut assets);
         });
         let stats = assets.stats();

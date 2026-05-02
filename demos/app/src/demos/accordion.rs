@@ -736,10 +736,10 @@ mod tests {
             time: Some(time),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input(0.0), |ctx| {
+        let _ = ctx.run_ui(raw_input(0.0), |ctx| {
             demo.show_with_assets(ctx, &engine, &mut assets);
         });
-        let output = ctx.run(raw_input(1.0), |ctx| {
+        let output = ctx.run_ui(raw_input(1.0), |ctx| {
             demo.show_with_assets(ctx, &engine, &mut assets);
         });
         let stats = assets.stats();
@@ -773,10 +773,10 @@ mod tests {
             time: Some(time),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input(0.0), |ctx| {
+        let _ = ctx.run_ui(raw_input(0.0), |ctx| {
             demo.show_with_assets(ctx, &engine, &mut assets);
         });
-        let output = ctx.run(raw_input(1.0), |ctx| {
+        let output = ctx.run_ui(raw_input(1.0), |ctx| {
             demo.show_with_assets(ctx, &engine, &mut assets);
         });
 
