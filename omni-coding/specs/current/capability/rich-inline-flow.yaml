@@ -1,0 +1,51 @@
+id: capability.rich-inline-flow
+kind: capability
+version: 1
+status: current
+summary: inline-only mixed-style flow 与 atomic item 排版
+crate: pretext
+module: crates/pretext/src/rich_inline.rs
+entry_points:
+  - pretext::rich_inline::prepare_rich_inline
+  - pretext::rich_inline::layout_rich_inline
+  - pretext::rich_inline::walk_rich_inline_line_ranges
+  - pretext::rich_inline::walk_rich_inline_lines
+  - pretext::rich_inline::measure_rich_inline_stats
+  - pretext::rich_inline::layout_next_rich_inline_line
+  - pretext::rich_inline::layout_next_rich_inline_line_range
+  - pretext::rich_inline::materialize_rich_inline_line_range
+input:
+  items: RichInlineItemSpec list
+  max_width: f32
+  engine: PretextEngine
+output:
+  prepared: PreparedRichInline
+  lines: RichInlineLine list
+  ranges: RichInlineLineRange stream
+  stats: RichInlineStats
+item_features:
+  - mixed_styles
+  - collapsed_boundary_whitespace
+  - extra_width
+  - atomic_placeholder_compatibility
+  - per_item_line_lookup
+constraints:
+  scope: inline-only-flow
+  block_layout_owner: capability.text-layout
+  boundary_whitespace: collapsed
+  empty_items: skipped-after-gap-accounting
+invariants:
+  - atomic_items_do_not_split
+  - measured_stats_match_materialized_layout
+  - source_item_mapping_remains_stable
+  - line_ranges_materialize_without_reflow
+semantics:
+  atomic_items_do_not_split: prepared inline items with atomic widths stay whole across a line break
+  measured_stats_match_materialized_layout: stats and materialized rich-inline lines agree on line count and max width
+  source_item_mapping_remains_stable: item_line uses source item indexes after whitespace-only items are skipped
+  line_ranges_materialize_without_reflow: materializing a range uses prepared item payloads rather than recomputing paragraph flow
+relations:
+  depends_on:
+    - capability.text-layout
+  extends: []
+  constrains: []

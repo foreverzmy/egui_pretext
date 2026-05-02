@@ -1,0 +1,55 @@
+id: contract.upstream-map
+kind: contract
+version: 1
+status: current
+summary: TypeScript reference API 与 Rust public API 映射
+reference_root: pretext_js
+public_api_map:
+  prepare: PretextEngine::prepare
+  layout:
+    - PretextEngine::layout
+    - PreparedTextWithSegments::measure
+  prepareWithSegments:
+    - PretextEngine::prepare_with_segments
+    - PretextEngine::prepare_paragraph
+  layoutWithLines: PretextEngine::layout_with_lines
+  walkLineRanges: PretextEngine::walk_line_ranges
+  layoutNextLine: PretextEngine::layout_next_line
+  layoutNextLineRange:
+    - PreparedTextWithSegments::layout_next_line_range
+    - pretext::advanced::layout_next_line_range
+  measureLineGeometry:
+    - PreparedTextWithSegments::measure_line_geometry
+    - pretext::advanced::measure_line_geometry
+  measureNaturalWidth:
+    - PreparedTextWithSegments::measure_natural_width
+    - pretext::advanced::measure_natural_width
+  richInlineHelpers: pretext::rich_inline
+change_routing:
+  segmentation_punctuation_keep_all_script_policy: crates/pretext/src/analysis.rs
+  break_legality_rules: crates/pretext/src/line_break.rs
+  walker_soft_hyphen_line_range_behavior: crates/pretext/src/layout.rs
+  width_measurement_grapheme_prefix_shaping_cache: crates/pretext/src/measure.rs
+  public_geometry_helper:
+    - PreparedTextWithSegments
+    - pretext::advanced
+constraints:
+  mapping_source: docs/upstream-map.md
+  rust_api_preference: stable-root-plus-advanced-mirror
+  browser_specific_behavior: require-native-shaping-assessment
+invariants:
+  - upstream_public_helper_has_rust_counterpart
+  - js_module_change_routes_to_owned_rust_module
+  - intentional_divergences_remain_explicit
+semantics:
+  upstream_public_helper_has_rust_counterpart: new upstream geometry helpers should be mirrored on PreparedTextWithSegments and pretext::advanced when applicable
+  js_module_change_routes_to_owned_rust_module: changed TypeScript modules map to the Rust files listed by this contract before implementation starts
+  intentional_divergences_remain_explicit: differences caused by Rust engine ownership, bidi handling, or shaping module split are preserved unless changed intentionally
+relations:
+  depends_on:
+    - system.upstream-alignment
+    - contract.pretext-public-api
+  extends: []
+  constrains:
+    - capability.text-layout
+    - capability.rich-inline-flow

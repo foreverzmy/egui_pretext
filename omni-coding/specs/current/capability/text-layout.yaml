@@ -1,0 +1,74 @@
+id: capability.text-layout
+kind: capability
+version: 1
+status: current
+summary: 段落准备、测量、排版、shaping、bidi 与 line breaking
+crate: pretext
+entry_points:
+  stable:
+    - PretextEngine::builder
+    - PretextEngine::prepare_paragraph
+    - PretextPreparedParagraph::measure
+    - PretextPreparedParagraph::layout
+    - PretextPreparedParagraph::measure_line_geometry
+    - PretextPreparedParagraph::measure_natural_width
+    - PretextEngine::measure_paragraph
+    - PretextEngine::layout_paragraph
+    - PretextEngine::walk_line_ranges
+  advanced:
+    - pretext::advanced::prepare_text
+    - pretext::advanced::measure_text
+    - pretext::advanced::layout_lines
+    - pretext::advanced::measure_line_geometry
+    - pretext::advanced::measure_natural_width
+    - pretext::advanced::layout_next_line_range
+input:
+  text: string
+  style: PretextStyle
+  options: PretextParagraphOptions
+  max_width: f32
+  line_height: f32
+output:
+  metrics: PretextParagraphMetrics
+  layout: PretextParagraphLayout
+  line_geometry: PretextLineGeometry
+  line_ranges: LayoutLineRange stream
+  glyph_runs: PretextGlyphRun list
+implementation_modules:
+  analysis: crates/pretext/src/analysis.rs
+  bidi: crates/pretext/src/bidi.rs
+  font_catalog: crates/pretext/src/font_catalog.rs
+  measure: crates/pretext/src/measure.rs
+  line_break: crates/pretext/src/line_break.rs
+  layout: crates/pretext/src/layout.rs
+  engine: crates/pretext/src/engine.rs
+constraints:
+  whitespace_modes:
+    - Normal
+    - PreWrap
+  word_break_modes:
+    - Normal
+    - KeepAll
+  paragraph_direction_modes:
+    - Auto
+    - Ltr
+    - Rtl
+  cache_owner: PretextEngine
+  normal_path: pretext-root-exports
+invariants:
+  - layout_is_deterministic
+  - measurement_matches_layout_line_count
+  - cursor_progress_reaches_eof
+  - glyph_runs_preserve_visual_direction
+  - caches_follow_engine_revision
+semantics:
+  layout_is_deterministic: same engine revision and same inputs produce the same line boundaries and metrics
+  measurement_matches_layout_line_count: measuring and full layout for the same paragraph agree on line count
+  cursor_progress_reaches_eof: layout_next_line-style calls advance until no further line is returned
+  glyph_runs_preserve_visual_direction: visual and glyph runs carry bidi level and direction for renderer use
+  caches_follow_engine_revision: locale or font-catalog changes invalidate runtime caches through the engine revision
+relations:
+  depends_on:
+    - system.runtime
+  extends: []
+  constrains: []

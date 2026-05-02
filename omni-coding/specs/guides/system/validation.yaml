@@ -1,0 +1,18 @@
+id: guide.system.validation
+kind: guide
+target: system.validation
+summary: 按修改面选择验证命令
+notes:
+  - 修改 paragraph prep、measurement、layout 或 cache 时，先跑 `cargo test -p pretext`。
+  - 修改 renderer root API、advanced helpers、glyph atlas 或 text textures 时，跑 `cargo test -p pretext-egui`。
+  - 修改 demo 逻辑、bundled asset bootstrapping 或 egui integration 时，跑 `cargo test -p pretext-demo-app`。
+  - 跨 crate 或跨多个 demo 的改动，最终跑 `cargo test --all`。
+  - 交互或 paint output 改动需要 `cargo run -p pretext-demo-app` 做视觉确认。
+commands:
+  fast_engine: cargo test -p pretext
+  renderer: cargo test -p pretext-egui
+  demo: cargo test -p pretext-demo-app
+  all: cargo test --all
+  format: cargo fmt --all --check
+  goldens: cargo test -p pretext --test goldens
+  refresh_goldens: UPDATE_GOLDENS=1 cargo test -p pretext --test goldens

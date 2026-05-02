@@ -1,0 +1,17 @@
+id: guide.capability.egui-rendering
+kind: guide
+target: capability.egui-rendering
+summary: egui renderer 路径和性能模式
+notes:
+  - 默认使用 atlas-backed paragraph 或 positioned-run painting；`rasterize_text_texture(...)` 是特殊复用/合成路径。
+  - heavy demo 不应在 `show(...)` 同步构建所有缓存，应拆成 deterministic warmup stages。
+  - cache key 应使用量化后的 width、obstacle、angle 或 engine revision，避免 raw float 抖动触发重排。
+  - 系统字体加载应是用户触发的一次 engine revision 变化，不应后台替换导致大量 demo cache 失效。
+rendering_choices:
+  paragraph_widget: EguiPretextRenderer::paragraph
+  explicit_origin_paragraph: EguiPretextRenderer::paint_paragraph
+  many_positioned_lines: pretext_egui::advanced::paint_positioned_text_runs
+  mixed_positioned_lines: pretext_egui::advanced::paint_styled_positioned_text_runs
+  custom_fragment_stream: pretext_egui::advanced::PretextFragmentPainter
+  reusable_texture: EguiPretextRenderer::rasterize_text_texture
+  glyph_scene_control: pretext_egui::advanced

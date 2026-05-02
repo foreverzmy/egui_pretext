@@ -1,0 +1,71 @@
+id: contract.pretext-public-api
+kind: contract
+version: 1
+status: current
+summary: pretext 稳定 root API 与 advanced API 边界
+crate: pretext
+stable_root_exports:
+  - PretextEngine
+  - PretextEngineBuilder
+  - PretextStyle
+  - PretextParagraphOptions
+  - PretextPreparedParagraph
+  - PretextParagraphMetrics
+  - PretextParagraphLayout
+  - PretextLineGeometry
+  - PretextLine
+  - PretextVisualRun
+  - PretextGlyphRun
+  - WhiteSpaceMode
+  - WordBreakMode
+  - ParagraphDirection
+  - BidiDirection
+  - rich_inline
+advanced_exports:
+  - LayoutCursor
+  - PreparedText
+  - PreparedTextWithSegments
+  - LayoutLine
+  - LayoutLineRange
+  - LayoutLineWithRuns
+  - LayoutLineRuns
+  - ShapedTextSpan
+  - prepare_text
+  - measure_text
+  - layout_lines
+  - measure_line_geometry
+  - measure_natural_width
+  - layout_next_line_range
+root_usage:
+  - standard_paragraph_preparation
+  - measurement
+  - full_paragraph_layout
+  - rich_inline_module_entry
+advanced_usage:
+  - cursor_driven_continuation
+  - line_range_streaming
+  - glyph_run_inspection
+  - obstacle_flow
+  - custom_shaping_debug
+constraints:
+  root_exports_are_stable_path: true
+  advanced_exports_are_low_level_path: true
+  hidden_modules_not_normal_import_path: true
+  options_construction: prefer-Default-update-syntax
+invariants:
+  - normal_sdk_usage_stays_on_root_exports
+  - low_level_flow_uses_advanced
+  - public_additions_are_intentional
+semantics:
+  normal_sdk_usage_stays_on_root_exports: app and docs should prefer pretext root names for paragraph preparation, measurement, and layout
+  low_level_flow_uses_advanced: cursor-driven or geometry-only helpers live under pretext::advanced rather than expanding the root path
+  public_additions_are_intentional: new stable exports must be deliberate and re-exported from the crate root only when stable
+relations:
+  depends_on:
+    - system.runtime
+    - capability.text-layout
+    - capability.rich-inline-flow
+  extends: []
+  constrains:
+    - capability.text-layout
+    - capability.rich-inline-flow

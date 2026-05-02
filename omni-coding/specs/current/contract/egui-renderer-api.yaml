@@ -1,0 +1,57 @@
+id: contract.egui-renderer-api
+kind: contract
+version: 1
+status: current
+summary: pretext-egui 稳定 renderer API 与 advanced renderer API 边界
+crate: pretext-egui
+stable_root_exports:
+  - EguiPretextRenderer
+  - EguiPretextParagraph
+  - EguiPretextPaintOptions
+  - EguiPretextRendererStats
+  - PretextTextureRasterRequest
+  - PretextTextTexture
+  - PretextTextureRasterError
+  - BaselineMetrics
+  - BaselineMode
+advanced_exports:
+  - paint_positioned_text_runs
+  - paint_styled_positioned_text_runs
+  - paint_line_glyph_runs
+  - PretextFragmentPainter
+  - new_glyph_scene
+  - append_glyph_runs
+  - flush_glyph_scene
+  - enqueue_atlas_warmup
+  - tick_atlas_warmup
+  - split_builtin_emoji_glyphs
+  - strip_builtin_emoji_glyphs
+stable_paths:
+  paragraph_widget: EguiPretextRenderer::paragraph
+  explicit_paragraph_paint: EguiPretextRenderer::paint_paragraph
+  texture_rasterization: EguiPretextRenderer::rasterize_text_texture
+  renderer_stats: EguiPretextRenderer::stats
+advanced_paths:
+  positioned_runs: pretext_egui::advanced::paint_positioned_text_runs
+  styled_positioned_runs: pretext_egui::advanced::paint_styled_positioned_text_runs
+  glyph_scene_control: pretext_egui::advanced::new_glyph_scene
+  atlas_warmup: pretext_egui::advanced::enqueue_atlas_warmup
+constraints:
+  default_rendering_path: atlas-backed-paragraph-or-positioned-runs
+  text_texture_path: special-purpose-reuse-or-composition
+  experimental_assets_scope: demos-and-tests-only
+invariants:
+  - paragraph_paint_consumes_pretext_layout
+  - advanced_helpers_do_not_replace_standard_path
+  - renderer_stats_expose_cache_behavior
+semantics:
+  paragraph_paint_consumes_pretext_layout: root paint APIs receive PretextParagraphLayout prepared by pretext
+  advanced_helpers_do_not_replace_standard_path: advanced renderer helpers are reserved for custom scenes and glyph-level control
+  renderer_stats_expose_cache_behavior: stats must make texture, atlas, warmup, mesh, and render cache behavior observable
+relations:
+  depends_on:
+    - capability.egui-rendering
+    - capability.text-rasterization
+  extends: []
+  constrains:
+    - capability.egui-rendering

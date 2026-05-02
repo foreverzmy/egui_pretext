@@ -1,0 +1,55 @@
+id: capability.text-rasterization
+kind: capability
+version: 1
+status: current
+summary: shaping-backed text texture rasterization 与 baseline metrics
+crate: pretext-render
+module: crates/pretext-render/src/lib.rs
+entry_points:
+  - TextRenderCache::rasterized_text
+  - TextRenderCache::stats_snapshot
+  - TextRenderCache::clear
+  - TextRasterRequest::logical_size
+  - RasterizedText::cache_id
+  - RasterizedText::logical_size
+  - RasterizedText::pixel_size
+  - RasterizedText::alpha_pixels
+  - text_baseline_metrics
+input:
+  text: string
+  style: PretextStyle
+  direction: BidiDirection
+  slot_height: f32
+  padding_x: f32
+  padding_y: f32
+  slack_x: f32
+  slack_y: f32
+  baseline_mode: BaselineMode
+  raster_scale: f32
+output:
+  rasterized_text: RasterizedText
+  baseline_metrics: BaselineMetrics
+  render_stats: RenderStatsSnapshot
+caches:
+  rasterized_text_capacity: 1024
+  glyph_path_capacity: 4096
+constraints:
+  raster_output: alpha-mask
+  shaping_owner: PretextEngine
+  path_builder: tiny-skia
+  cache_key_quantization: enabled
+invariants:
+  - raster_cache_key_includes_scale
+  - logical_size_is_positive
+  - baseline_metrics_match_shaped_spans
+  - cache_id_identifies_raster_payload
+semantics:
+  raster_cache_key_includes_scale: rasterized text cache entries include request fields and raster scale
+  logical_size_is_positive: texture logical width and height clamp to at least one logical pixel before padding and slack
+  baseline_metrics_match_shaped_spans: baseline metrics are derived from engine-shaped spans for the same request
+  cache_id_identifies_raster_payload: downstream texture caches use RasterizedText cache_id to reuse uploaded textures
+relations:
+  depends_on:
+    - capability.text-layout
+  extends: []
+  constrains: []

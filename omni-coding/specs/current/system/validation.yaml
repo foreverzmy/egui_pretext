@@ -1,0 +1,64 @@
+id: system.validation
+kind: system
+version: 1
+status: current
+summary: 格式化、单元测试、golden 与视觉验证入口
+commands:
+  format_check: cargo fmt --all --check
+  all_tests: cargo test --all
+  pretext_tests: cargo test -p pretext
+  pretext_egui_tests: cargo test -p pretext-egui
+  demo_app_tests: cargo test -p pretext-demo-app
+  golden_tests: cargo test -p pretext --test goldens
+  golden_refresh: UPDATE_GOLDENS=1 cargo test -p pretext --test goldens
+  demo_run: cargo run -p pretext-demo-app
+test_surfaces:
+  engine:
+    - shaping
+    - font_fallback
+    - whitespace
+    - segmentation
+    - line_break
+    - bidi
+    - layout_parity
+    - line_runs
+    - paragraph_cache
+    - letter_spacing
+  goldens:
+    count: 12
+    path: crates/pretext/tests/goldens
+  demo:
+    - demo_logic_tests
+    - headless_smoke
+validation_targets:
+  - measure_and_layout_agree
+  - line_count_is_deterministic
+  - cursor_progression_reaches_eof
+  - atomic_placeholders_do_not_split
+  - renderer_stats_reflect_cache_path
+  - warmup_reaches_ready
+  - heavy_demo_reopen_stays_warm
+constraints:
+  golden_refresh_requires_intent: true
+  visual_validation_needed_for_paint_or_interaction: true
+  narrow_tests_before_all_tests: true
+  ci_required_commands:
+    - cargo fmt --all --check
+    - cargo test --all
+invariants:
+  - skipped_validation_must_be_reported
+  - golden_diffs_are_behavior_changes
+  - renderer_changes_need_cache_or_visual_checks
+semantics:
+  skipped_validation_must_be_reported: handoff must state commands that were not run and why
+  golden_diffs_are_behavior_changes: JSON golden updates require explicit review as intentional behavior changes
+  renderer_changes_need_cache_or_visual_checks: paint, texture, atlas, or warmup changes require targeted renderer checks and usually visual confirmation
+relations:
+  depends_on:
+    - system.workspace
+    - system.runtime
+    - capability.text-layout
+    - capability.egui-rendering
+    - capability.demo-app
+  extends: []
+  constrains: []

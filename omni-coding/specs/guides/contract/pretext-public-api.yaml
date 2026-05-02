@@ -1,0 +1,19 @@
+id: guide.contract.pretext-public-api
+kind: guide
+target: contract.pretext-public-api
+summary: public API 使用示例和边界提醒
+notes:
+  - 标准 SDK 示例应从 root import `PretextEngine`、`PretextStyle`、`PretextParagraphOptions`。
+  - 构造 `PretextParagraphOptions` 时优先使用 `..Default::default()`，避免字段演进破坏示例。
+  - "`pretext::advanced` 适合 cursor-driven layout、line-only geometry、custom shaping inspection，不是普通 paragraph path。"
+examples:
+  - path: stable paragraph
+    calls:
+      - PretextEngine::builder().build()
+      - engine.prepare_paragraph(text, style, options)
+      - prepared.measure(&engine, max_width, line_height)
+      - prepared.layout(&engine, max_width, line_height)
+  - path: rich inline
+    calls:
+      - pretext::rich_inline::prepare_rich_inline
+      - pretext::rich_inline::layout_rich_inline

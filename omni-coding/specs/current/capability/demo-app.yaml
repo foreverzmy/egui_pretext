@@ -1,0 +1,56 @@
+id: capability.demo-app
+kind: capability
+version: 1
+status: current
+summary: eframe desktop demo shell 与 Pretext demo catalog
+crate: pretext-demo-app
+entry_points:
+  - demos/app/src/main.rs
+  - demos/app/src/app.rs
+  - demos/app/src/demos/mod.rs
+  - demos/app/src/demos/catalog.rs
+demos:
+  - accordion
+  - bubbles
+  - markdown_chat
+  - rich_note
+  - masonry
+  - dynamic_layout
+  - dragon_through_text
+  - editorial_engine
+  - justification_algorithms
+  - variable_typographic_ascii
+assets:
+  fonts: demos/app/assets/fonts
+  emoji_svg:
+    - demos/app/assets/emoji_u1f680.svg
+    - demos/app/assets/emoji_u1f389.svg
+    - demos/app/assets/emoji_u2705.svg
+  logos: demos/app/assets/logos
+  data: demos/app/assets/shower-thoughts.json
+runtime_state:
+  engine: PretextEngine
+  renderer: EguiPretextRenderer
+  font_mode: bundled-fonts-by-default
+  warmup: staged-demo-and-atlas-warmup
+constraints:
+  app_shell: eframe
+  standard_demo_assets: bundled-fonts-and-svg
+  system_font_loading: explicit-user-trigger
+  heavy_demo_policy: staged-warmup-before-full-render
+invariants:
+  - opening_demo_should_not_block_on_all_heavy_work
+  - caches_survive_close_open_when_keys_match
+  - engine_revision_invalidates_dependent_caches
+  - demo_tests_cover_window_smoke
+semantics:
+  opening_demo_should_not_block_on_all_heavy_work: heavy demos should show loading shells or staged readiness instead of doing all cold work inside show
+  caches_survive_close_open_when_keys_match: prepared text, layout, texture, and projection caches stay warm across close/open when invalidation keys are unchanged
+  engine_revision_invalidates_dependent_caches: font or locale changes force dependent demo state to rebuild through revision-aware keys
+  demo_tests_cover_window_smoke: headless smoke tests exercise opening each demo window
+relations:
+  depends_on:
+    - capability.egui-rendering
+    - capability.rich-inline-flow
+  extends: []
+  constrains: []

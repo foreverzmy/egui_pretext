@@ -1,0 +1,19 @@
+id: guide.capability.text-layout
+kind: guide
+target: capability.text-layout
+summary: text-layout API 选择指南
+notes:
+  - 只需要总高度或行数时，用 `prepared.measure(...)` 或 `engine.measure_paragraph(...)`。
+  - 需要完整 paragraph layout 和 visual/glyph runs 时，用 `prepared.layout(...)` 或 `engine.layout_paragraph(...)`。
+  - 需要 exact line ranges 但不需要 materialized lines 时，用 `walk_line_ranges` 或 `layout_next_line_range`。
+  - 需要 continuation、columns、obstacle flow 时，用 `LayoutCursor` 和 `layout_next_line*` advanced path。
+  - 需要 no-space CJK-led text 保持 cohesive 时，用 `WordBreakMode::KeepAll`，不要在 app 里硬编码 punctuation merge。
+examples:
+  - need: total paragraph height
+    use: PretextPreparedParagraph::measure
+  - need: paragraph paint payload
+    use: PretextPreparedParagraph::layout
+  - need: natural unwrapped width
+    use: PretextPreparedParagraph::measure_natural_width
+  - need: per-grapheme offsets
+    use: PretextEngine::prefix_widths

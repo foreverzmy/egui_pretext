@@ -1,0 +1,21 @@
+id: guide.system.workspace
+kind: guide
+target: system.workspace
+summary: Repo map 和事实来源读取顺序
+notes:
+  - 新任务优先查看 crate root exports；`plan.md` 是架构记录，不是当前实现的最高优先级。
+  - "`skills/egui-pretext-layout/references/repo-map.md` 给出了常用修改入口和 demo pattern。"
+  - "`pretext_js` 有自己的 `AGENTS.md`；只有编辑子模块时才读取并遵守。"
+source_files:
+  public_api:
+    - crates/pretext/src/lib.rs
+    - crates/pretext-egui/src/lib.rs
+  architecture_record:
+    - plan.md
+  upstream_mapping:
+    - docs/upstream-map.md
+  coding_references:
+    - skills/egui-pretext-layout/references/repo-map.md
+    - skills/egui-pretext-layout/references/patterns.md
+    - skills/egui-pretext-layout/references/performance.md
+    - skills/egui-pretext-layout/references/validation.md

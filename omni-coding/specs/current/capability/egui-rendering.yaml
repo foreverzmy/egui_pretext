@@ -1,0 +1,61 @@
+id: capability.egui-rendering
+kind: capability
+version: 1
+status: current
+summary: egui paragraph painting、glyph atlas、texture cache 与 warmup
+crate: pretext-egui
+entry_points:
+  stable:
+    - EguiPretextRenderer::default
+    - EguiPretextRenderer::paint_paragraph
+    - EguiPretextRenderer::paragraph
+    - EguiPretextRenderer::rasterize_text_texture
+    - EguiPretextRenderer::stats
+    - EguiPretextPaintOptions::new
+  advanced:
+    - pretext_egui::advanced::paint_positioned_text_runs
+    - pretext_egui::advanced::paint_styled_positioned_text_runs
+    - pretext_egui::advanced::paint_line_glyph_runs
+    - pretext_egui::advanced::new_glyph_scene
+    - pretext_egui::advanced::append_glyph_runs
+    - pretext_egui::advanced::flush_glyph_scene
+    - pretext_egui::advanced::enqueue_atlas_warmup
+    - pretext_egui::advanced::tick_atlas_warmup
+input:
+  painter: egui::Painter
+  origin: egui::Pos2
+  layout: PretextParagraphLayout
+  paint_options: EguiPretextPaintOptions
+  context: egui::Context
+  engine: PretextEngine
+output:
+  egui_shapes: textured glyph meshes and fallback text
+  texture_handles: static SVG and shaped text textures
+  stats: EguiPretextRendererStats
+implementation_modules:
+  root_renderer: crates/pretext-egui/src/lib.rs
+  advanced_api: crates/pretext-egui/src/advanced.rs
+  advanced_impl: crates/pretext-egui/src/advanced_impl.rs
+  glyph_atlas: crates/pretext-egui/src/glyph_atlas.rs
+  experimental_assets: crates/pretext-egui/src/experimental.rs
+constraints:
+  default_path: atlas-backed paragraph painting
+  texture_rasterization_path: special-purpose
+  demo_assets_scope: experimental-only
+  warmup_reset_key: engine-revision
+invariants:
+  - renderer_reuses_texture_handles
+  - atlas_warmup_tracks_engine_revision
+  - root_renderer_uses_pretext_layout_payload
+  - experimental_assets_do_not_expand_stable_api
+semantics:
+  renderer_reuses_texture_handles: static SVG and shaped text texture caches avoid repeated uploads for the same keys
+  atlas_warmup_tracks_engine_revision: pending and completed warmup buckets reset when the engine revision changes
+  root_renderer_uses_pretext_layout_payload: paragraph painting consumes PretextParagraphLayout rather than re-breaking text in egui
+  experimental_assets_do_not_expand_stable_api: bundled fonts, SVG logos, and emoji helpers remain under experimental demo assets
+relations:
+  depends_on:
+    - capability.text-layout
+    - capability.text-rasterization
+  extends: []
+  constrains: []

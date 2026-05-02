@@ -1,0 +1,16 @@
+id: guide.system.upstream-alignment
+kind: guide
+target: system.upstream-alignment
+summary: upstream follow-up 排查顺序
+notes:
+  - 上游改 segmentation、punctuation glue、keep-all 或 script policy 时，从 `analysis.rs` 开始。
+  - 上游改 break legality rules 时，从 `line_break.rs` 开始。
+  - 上游改 walker alignment、soft hyphen 或 line-range behavior 时，从 `layout.rs` 开始。
+  - 上游改 width measurement、grapheme prefix widths 或 shaping caches 时，从 `measure.rs` 开始。
+  - 上游新增 public geometry helper 时，优先加到 `PreparedTextWithSegments` 并在 `pretext::advanced` 镜像。
+checks:
+  - confirm_upstream_commit_or_diff
+  - map_changed_js_files_to_rust_counterparts
+  - identify_browser_only_behavior
+  - decide_port_mirror_or_ignore
+  - update_Rust_tests_or_goldens_when_behavior_changes

@@ -1,0 +1,47 @@
+id: system.upstream-alignment
+kind: system
+version: 1
+status: current
+summary: pretext_js reference 与 Rust counterpart 同步规则
+upstream:
+  path: pretext_js
+  role: TypeScript reference implementation
+  pointer_policy: explicit-user-request-only
+mapping_file: docs/upstream-map.md
+module_map:
+  pretext_js/src/analysis.ts: crates/pretext/src/analysis.rs
+  pretext_js/src/bidi.ts: crates/pretext/src/bidi.rs
+  pretext_js/src/measurement.ts:
+    - crates/pretext/src/measure.rs
+    - crates/pretext/src/font_catalog.rs
+  pretext_js/src/line-break.ts:
+    - crates/pretext/src/layout.rs
+    - crates/pretext/src/line_break.rs
+  pretext_js/src/layout.ts:
+    - crates/pretext/src/engine.rs
+    - crates/pretext/src/layout.rs
+    - crates/pretext/src/advanced.rs
+  pretext_js/src/rich-inline.ts: crates/pretext/src/rich_inline.rs
+intentional_divergences:
+  - explicit_PretextEngine_owns_fonts_caches_locale
+  - unicode_bidi_for_real_bidi_runs
+  - shaping_and_font_fallback_split_into_modules
+constraints:
+  browser_only_heuristics: assess-before-porting
+  new_public_geometry_helper: prefer-PreparedTextWithSegments-and-advanced-mirror
+  upstream_submodule_edits: prohibited-without-explicit-sync-request
+invariants:
+  - map_upstream_change_to_rust_counterpart_first
+  - port_semantics_not_browser_accidents
+  - keep_rust_public_shape_stable_unless_parity_requires_change
+semantics:
+  map_upstream_change_to_rust_counterpart_first: use docs/upstream-map.md before choosing Rust files for an upstream follow-up
+  port_semantics_not_browser_accidents: browser-specific TypeScript behavior is copied only when it remains meaningful in native shaping
+  keep_rust_public_shape_stable_unless_parity_requires_change: Rust root and advanced API boundaries remain authoritative unless the task asks for parity changes
+relations:
+  depends_on:
+    - system.workspace
+    - capability.text-layout
+    - capability.rich-inline-flow
+  extends: []
+  constrains: []

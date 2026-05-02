@@ -1,0 +1,56 @@
+id: system.workspace
+kind: system
+version: 1
+status: current
+summary: Rust workspace 与上游子模块边界
+workspace:
+  repository: pretext-rs
+  edition: "2021"
+  license: MIT
+members:
+  - path: crates/pretext
+    package: pretext
+    role: stable layout SDK
+  - path: crates/pretext-render
+    package: pretext-render
+    role: shaping-backed rasterization helpers
+  - path: crates/pretext-egui
+    package: pretext-egui
+    role: egui renderer SDK
+  - path: demos/app
+    package: pretext-demo-app
+    role: eframe desktop demo shell
+support_paths:
+  - path: tests_support
+    role: shared integration-test fixtures
+  - path: docs/upstream-map.md
+    role: JS-to-Rust correspondence guide
+  - path: skills/egui-pretext-layout/references
+    role: weak guide layer for coding patterns
+  - path: pretext_js
+    role: upstream TypeScript reference submodule
+source_authority:
+  first:
+    - crates/pretext/src/lib.rs
+    - crates/pretext-egui/src/lib.rs
+  second:
+    - skills/egui-pretext-layout/references
+  third:
+    - plan.md
+constraints:
+  workspace_root: repository-root
+  dependency_versions: centralized-in-root-Cargo.toml
+  submodule_scope: reference-only-unless-user-requests-sync
+  implementation_authority: current-code-before-narrative-records
+invariants:
+  - preserve_crate_separation
+  - use_public_exports_as_primary_authority
+  - do_not_advance_submodule_without_request
+semantics:
+  preserve_crate_separation: layout, rasterization, egui rendering, and demos stay in separate workspace members
+  use_public_exports_as_primary_authority: exported names in crate roots override stale examples or architecture notes
+  do_not_advance_submodule_without_request: pretext_js pointer changes require an explicit upstream-sync request
+relations:
+  depends_on: []
+  extends: []
+  constrains: []

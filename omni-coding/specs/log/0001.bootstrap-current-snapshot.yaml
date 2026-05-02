@@ -1,0 +1,40 @@
+kind: bootstrap
+status: recorded
+summary: 初始整理当前项目事实为 Current State Snapshot
+created_current_specs:
+  - system.workspace
+  - system.runtime
+  - system.validation
+  - system.upstream-alignment
+  - capability.text-layout
+  - capability.rich-inline-flow
+  - capability.text-rasterization
+  - capability.egui-rendering
+  - capability.demo-app
+  - contract.pretext-public-api
+  - contract.egui-renderer-api
+  - contract.upstream-map
+created_guides:
+  - guide.system.workspace
+  - guide.capability.text-layout
+  - guide.capability.egui-rendering
+  - guide.system.validation
+  - guide.system.upstream-alignment
+  - guide.contract.pretext-public-api
+source_files:
+  - README.md
+  - Cargo.toml
+  - .github/workflows/ci.yml
+  - docs/upstream-map.md
+  - AGENTS.md
+  - crates/pretext/src/lib.rs
+  - crates/pretext/src/engine.rs
+  - crates/pretext/src/rich_inline.rs
+  - crates/pretext-egui/src/lib.rs
+  - crates/pretext-render/src/lib.rs
+  - skills/egui-pretext-layout/references/repo-map.md
+  - skills/egui-pretext-layout/references/patterns.md
+  - skills/egui-pretext-layout/references/performance.md
+  - skills/egui-pretext-layout/references/validation.md
+archive_written: false
+reason_archive_not_written: initial-bootstrap-without-previous-current-snapshot
