@@ -1,9 +1,8 @@
 use ahash::AHashMap;
 
 use crate::analysis::{
-    can_continue_keep_all_text_run, contains_cjk_text, is_cjk, is_cjk_line_end_prohibited,
-    is_cjk_line_start_prohibited, slice_text, AnalyzedGrapheme, GraphemeKind, TextAnalysis,
-    WordBreakMode,
+    contains_cjk_text, is_cjk, is_cjk_line_end_prohibited, is_cjk_line_start_prohibited,
+    slice_text, AnalyzedGrapheme, GraphemeKind, TextAnalysis, WordBreakMode,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,13 +144,23 @@ fn rule_keep_all_text_run(ctx: &BreakContext<'_>) -> BreakOpportunity {
     if ctx.analysis.word_break != WordBreakMode::KeepAll
         || ctx.current.kind != GraphemeKind::Text
         || !ctx.next.is_some_and(|next| next.kind == GraphemeKind::Text)
-        || !contains_cjk_text(ctx.current_text)
-        || !can_continue_keep_all_text_run(ctx.current_text)
+        || !boundary_is_inside_keep_all_segment(ctx)
     {
         return BreakOpportunity::Allowed;
     }
 
     BreakOpportunity::Prohibited
+}
+
+fn boundary_is_inside_keep_all_segment(ctx: &BreakContext<'_>) -> bool {
+    let Some(next) = ctx.next else {
+        return false;
+    };
+    ctx.analysis.segments.iter().any(|segment| {
+        segment.byte_range.start <= ctx.current.byte_range.start
+            && segment.byte_range.end >= next.byte_range.end
+            && contains_cjk_text(slice_text(&ctx.analysis.normalized, &segment.byte_range))
+    })
 }
 
 fn rule_cjk_punctuation(ctx: &BreakContext<'_>) -> BreakOpportunity {
@@ -217,6 +226,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );
@@ -233,6 +243,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );
@@ -248,6 +259,7 @@ mod tests {
                 white_space: WhiteSpaceMode::PreWrap,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );
@@ -263,6 +275,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );
@@ -281,6 +294,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );
@@ -296,6 +310,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::KeepAll,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );

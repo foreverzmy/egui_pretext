@@ -2276,6 +2276,7 @@ fn build_prepared_inline_block(
             style: &piece.meta.style,
             break_mode: piece.break_mode,
             extra_width: piece.meta.chrome_width,
+            letter_spacing: 0.0,
         });
     }
 
@@ -2702,6 +2703,7 @@ fn normal_options() -> PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
         word_break: WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
+        letter_spacing: 0.0,
     }
 }
 
@@ -2710,6 +2712,7 @@ fn pre_wrap_options() -> PrepareOptions {
         white_space: WhiteSpaceMode::PreWrap,
         word_break: WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
+        letter_spacing: 0.0,
     }
 }
 

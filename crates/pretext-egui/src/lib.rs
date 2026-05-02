@@ -1070,6 +1070,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = engine.layout_paragraph(&prepared, 220.0, 20.0);
@@ -1088,6 +1089,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = prepared.layout(&engine, 220.0, 22.0);
@@ -1135,6 +1137,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
 
@@ -1166,6 +1169,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = prepared.layout(&engine, 240.0, 22.0);
@@ -1220,6 +1224,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = engine.layout_paragraph(&prepared, 320.0, 22.0);
@@ -1282,6 +1287,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let prepared_mono = engine.prepare_paragraph(
@@ -1291,6 +1297,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout_body = engine.layout_paragraph(&prepared_body, 320.0, 22.0);
@@ -1417,6 +1424,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = engine.layout_paragraph(&prepared, 320.0, 22.0);
@@ -1482,6 +1490,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = engine.layout_paragraph(&prepared, 320.0, 22.0);
@@ -1542,6 +1551,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = engine.layout_paragraph(&prepared, 360.0, 22.0);
@@ -1611,6 +1621,7 @@ mod tests {
                 white_space: WhiteSpaceMode::Normal,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let layout = engine.layout_paragraph(&prepared, 240.0, 22.0);

@@ -130,6 +130,7 @@ fn layout_paragraph_matches_goldens() {
             &PretextParagraphOptions {
                 white_space: case.white_space,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
                 ..PretextParagraphOptions::default()
             },
         );

@@ -711,6 +711,7 @@ fn normal_options() -> PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
         word_break: WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
+        letter_spacing: 0.0,
     }
 }
 
@@ -763,6 +764,7 @@ fn prepare_rich_note(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Prepar
                     style: chip_text_style(),
                     break_mode: FlowBreakMode::Never,
                     extra_width: layout_extra_width,
+                    letter_spacing: 0.0,
                 });
                 items.push(InlineItem::Chip(ChipInlineItem {
                     tone,
@@ -781,6 +783,7 @@ fn prepare_rich_note(engine: &PretextEngine, specs: &[RichInlineSpec]) -> Prepar
                     style: style_model.spec,
                     break_mode: FlowBreakMode::Normal,
                     extra_width: style_model.chrome_width,
+                    letter_spacing: 0.0,
                 });
 
                 let trimmed_text = text.trim_matches(is_collapsible_boundary_char);

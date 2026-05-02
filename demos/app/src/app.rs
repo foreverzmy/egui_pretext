@@ -806,6 +806,7 @@ fn default_options() -> PretextParagraphOptions {
         white_space: WhiteSpaceMode::Normal,
         word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
+        letter_spacing: 0.0,
     }
 }
 

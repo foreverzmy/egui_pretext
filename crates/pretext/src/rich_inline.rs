@@ -27,6 +27,7 @@ pub struct RichInlineItemSpec<'a> {
     pub style: &'a PretextStyle,
     pub break_mode: RichInlineBreakMode,
     pub extra_width: f32,
+    pub letter_spacing: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,15 +96,17 @@ struct StyleCacheKey {
     size_px_bits: u32,
     weight: u16,
     italic: bool,
+    letter_spacing_bits: u32,
 }
 
 impl StyleCacheKey {
-    fn new(style: &PretextStyle) -> Self {
+    fn new(style: &PretextStyle, letter_spacing: f32) -> Self {
         Self {
             families: style.families.clone(),
             size_px_bits: style.size_px.to_bits(),
             weight: style.weight,
             italic: style.italic,
+            letter_spacing_bits: crate::engine::sanitize_letter_spacing(letter_spacing).to_bits(),
         }
     }
 }
@@ -142,14 +145,19 @@ pub fn prepare_rich_inline(
     let mut pending_gap = 0.0f32;
 
     for (index, item) in items.iter().enumerate() {
+        let letter_spacing = crate::engine::sanitize_letter_spacing(item.letter_spacing);
         let has_leading_whitespace = item.text.starts_with(is_collapsible_boundary_char);
         let has_trailing_whitespace = item.text.ends_with(is_collapsible_boundary_char);
         let trimmed = item.text.trim_matches(is_collapsible_boundary_char);
 
         if trimmed.is_empty() {
             if item.text.chars().any(is_collapsible_boundary_char) && pending_gap == 0.0 {
-                pending_gap =
-                    collapsed_space_width(engine, item.style, &mut collapsed_space_widths);
+                pending_gap = collapsed_space_width(
+                    engine,
+                    item.style,
+                    letter_spacing,
+                    &mut collapsed_space_widths,
+                );
             }
             continue;
         }
@@ -157,17 +165,31 @@ pub fn prepare_rich_inline(
         let gap_before = if pending_gap > 0.0 {
             pending_gap
         } else if has_leading_whitespace {
-            collapsed_space_width(engine, item.style, &mut collapsed_space_widths)
+            collapsed_space_width(
+                engine,
+                item.style,
+                letter_spacing,
+                &mut collapsed_space_widths,
+            )
         } else {
             0.0
         };
 
-        let prepared = engine.prepare_paragraph(trimmed, item.style, &normal_options());
+        let prepared = engine.prepare_paragraph(
+            trimmed,
+            item.style,
+            &normal_options_with_letter_spacing(letter_spacing),
+        );
         let mut cursor = LayoutCursor::default();
         let Some(whole_line) = engine.layout_next_line(&prepared, &mut cursor, UNBOUNDED_WIDTH)
         else {
             pending_gap = if has_trailing_whitespace {
-                collapsed_space_width(engine, item.style, &mut collapsed_space_widths)
+                collapsed_space_width(
+                    engine,
+                    item.style,
+                    letter_spacing,
+                    &mut collapsed_space_widths,
+                )
             } else {
                 0.0
             };
@@ -185,7 +207,12 @@ pub fn prepare_rich_inline(
         });
 
         pending_gap = if has_trailing_whitespace {
-            collapsed_space_width(engine, item.style, &mut collapsed_space_widths)
+            collapsed_space_width(
+                engine,
+                item.style,
+                letter_spacing,
+                &mut collapsed_space_widths,
+            )
         } else {
             0.0
         };
@@ -493,26 +520,29 @@ fn ends_inside_first_segment(cursor: LayoutCursor) -> bool {
     cursor.segment_index == 0 && cursor.grapheme_index > 0
 }
 
-fn normal_options() -> PretextParagraphOptions {
+fn normal_options_with_letter_spacing(letter_spacing: f32) -> PretextParagraphOptions {
     PretextParagraphOptions {
         white_space: WhiteSpaceMode::Normal,
         word_break: WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Auto,
+        letter_spacing,
     }
 }
 
 fn collapsed_space_width(
     engine: &PretextEngine,
     style: &PretextStyle,
+    letter_spacing: f32,
     cache: &mut HashMap<StyleCacheKey, f32>,
 ) -> f32 {
-    let key = StyleCacheKey::new(style);
+    let key = StyleCacheKey::new(style, letter_spacing);
     if let Some(width) = cache.get(&key) {
         return *width;
     }
 
-    let joined = engine.prepare_paragraph("A A", style, &normal_options());
-    let compact = engine.prepare_paragraph("AA", style, &normal_options());
+    let options = normal_options_with_letter_spacing(letter_spacing);
+    let joined = engine.prepare_paragraph("A A", style, &options);
+    let compact = engine.prepare_paragraph("AA", style, &options);
     let width = (single_line_width(engine, &joined) - single_line_width(engine, &compact)).max(0.0);
     cache.insert(key, width);
     width
@@ -591,24 +621,28 @@ mod tests {
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: "@maya",
                     style: &body,
                     break_mode: RichInlineBreakMode::Never,
                     extra_width: 22.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: " 's rich-note ",
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: "layoutNextLine()",
                     style: &code,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 14.0,
+                    letter_spacing: 0.0,
                 },
             ],
         );
@@ -640,18 +674,21 @@ mod tests {
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: "العربية",
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: " 北京",
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
             ],
         );
@@ -676,12 +713,14 @@ mod tests {
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: "layoutNextLine",
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
             ],
         );
@@ -756,24 +795,28 @@ mod tests {
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: "@maya",
                     style: &body,
                     break_mode: RichInlineBreakMode::Never,
                     extra_width: 22.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: " rich-inline keeps ",
                     style: &body,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 0.0,
+                    letter_spacing: 0.0,
                 },
                 RichInlineItemSpec {
                     text: "layoutNextLineRange()",
                     style: &code,
                     break_mode: RichInlineBreakMode::Normal,
                     extra_width: 14.0,
+                    letter_spacing: 0.0,
                 },
             ],
         );

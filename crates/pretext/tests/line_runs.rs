@@ -86,6 +86,7 @@ fn normal_whitespace_trims_trailing_spaces_before_visual_and_glyph_runs() {
         &support::default_style(),
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );

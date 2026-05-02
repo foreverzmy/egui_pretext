@@ -172,9 +172,11 @@ pub(crate) fn contains_cjk_text(text: &str) -> bool {
 }
 
 pub(crate) fn can_continue_keep_all_text_run(text: &str) -> bool {
-    text.chars()
-        .last()
-        .is_some_and(|ch| !is_left_sticky_punctuation_char(ch) && !is_keep_all_glue_char(ch))
+    text.chars().last().is_some_and(|ch| {
+        !is_keep_all_glue_char(ch)
+            && !is_left_sticky_punctuation_char(ch)
+            && !is_keep_all_dash_break_char(ch)
+    })
 }
 
 pub(crate) fn is_cjk_char(ch: char) -> bool {
@@ -205,6 +207,10 @@ pub(crate) fn is_cjk_char(ch: char) -> bool {
 
 fn is_keep_all_glue_char(ch: char) -> bool {
     matches!(ch, '\u{00A0}' | '\u{202F}' | '\u{2060}' | '\u{FEFF}')
+}
+
+fn is_keep_all_dash_break_char(ch: char) -> bool {
+    matches!(ch, '-' | '\u{2010}' | '\u{2013}' | '\u{2014}')
 }
 
 pub(crate) fn is_cjk_line_start_prohibited(text: &str) -> bool {
@@ -943,23 +949,85 @@ fn merge_keep_all_text_runs(
     pieces: Vec<SegmentationPiece>,
 ) -> Vec<SegmentationPiece> {
     let mut merged: Vec<SegmentationPiece> = Vec::with_capacity(pieces.len());
+    let mut group_start: Option<usize> = None;
+    let mut group_contains_cjk = false;
 
-    for piece in pieces {
-        if let Some(previous) = merged.last_mut() {
-            let previous_text = slice_text(normalized, &previous.byte_range);
-            if previous.kind == AnalysisSegmentKind::Text
-                && piece.kind == AnalysisSegmentKind::Text
-                && can_continue_keep_all_text_run(previous_text)
-                && contains_cjk_text(previous_text)
-            {
-                previous.byte_range.end = piece.byte_range.end;
-                previous.grapheme_range.end = piece.grapheme_range.end;
-                previous.word_like = previous.word_like || piece.word_like;
-                continue;
-            }
+    fn push_merged_group(
+        normalized: &str,
+        pieces: &[SegmentationPiece],
+        merged: &mut Vec<SegmentationPiece>,
+        start: usize,
+        end: usize,
+        contains_cjk: bool,
+    ) {
+        if start >= end {
+            return;
         }
 
+        if !contains_cjk {
+            merged.extend(pieces[start..end].iter().cloned());
+            return;
+        }
+
+        let mut piece = pieces[start].clone();
+        for next in &pieces[start + 1..end] {
+            piece.byte_range.end = next.byte_range.end;
+            piece.grapheme_range.end = next.grapheme_range.end;
+            piece.word_like = piece.word_like || next.word_like;
+        }
+        piece.kind = AnalysisSegmentKind::Text;
+        debug_assert!(contains_cjk_text(slice_text(normalized, &piece.byte_range)));
         merged.push(piece);
+    }
+
+    for (index, piece) in pieces.iter().enumerate() {
+        if piece.kind == AnalysisSegmentKind::Text {
+            if let Some(start) = group_start {
+                let previous_text = slice_text(normalized, &pieces[index - 1].byte_range);
+                if !can_continue_keep_all_text_run(previous_text) {
+                    push_merged_group(
+                        normalized,
+                        &pieces,
+                        &mut merged,
+                        start,
+                        index,
+                        group_contains_cjk,
+                    );
+                    group_start = Some(index);
+                    group_contains_cjk = false;
+                }
+            } else {
+                group_start = Some(index);
+            }
+
+            group_contains_cjk =
+                group_contains_cjk || contains_cjk_text(slice_text(normalized, &piece.byte_range));
+            continue;
+        }
+
+        if let Some(start) = group_start.take() {
+            push_merged_group(
+                normalized,
+                &pieces,
+                &mut merged,
+                start,
+                index,
+                group_contains_cjk,
+            );
+            group_contains_cjk = false;
+        }
+        merged.push(piece.clone());
+    }
+
+    if let Some(start) = group_start {
+        push_merged_group(
+            normalized,
+            &pieces,
+            &mut merged,
+            start,
+            pieces.len(),
+            group_contains_cjk,
+        );
     }
 
     merged
@@ -1316,6 +1384,7 @@ mod tests {
                 white_space,
                 word_break,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             None,
         );
@@ -1337,6 +1406,7 @@ mod tests {
                 white_space,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: crate::bidi::ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
             locale,
         );
@@ -1504,7 +1574,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_all_keeps_cjk_leading_no_space_runs_cohesive() {
+    fn keep_all_keeps_cjk_containing_no_space_runs_cohesive_with_boundaries() {
         assert_eq!(
             segment_texts_with_word_break(
                 "中文，测试。",
@@ -1523,11 +1593,43 @@ mod tests {
         );
         assert_eq!(
             segment_texts_with_word_break(
+                &"漢".repeat(256),
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["漢".repeat(256)]
+        );
+
+        for text in [
+            "abc日本語",
+            "123日本語",
+            "abc123日本語",
+            "foo_bar日本語",
+            "foo.bar日本語",
+            "500円テスト",
+            "日本語foo.bar",
+        ] {
+            assert_eq!(
+                segment_texts_with_word_break(text, WhiteSpaceMode::Normal, WordBreakMode::KeepAll),
+                vec![text.to_owned()]
+            );
+        }
+
+        assert_eq!(
+            segment_texts_with_word_break(
                 "日本語foo-bar",
                 WhiteSpaceMode::Normal,
                 WordBreakMode::KeepAll
             ),
-            vec!["日本語foo-bar".to_owned()]
+            vec!["日本語foo-".to_owned(), "bar".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "日本語foo—bar",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["日本語foo—".to_owned(), "bar".to_owned()]
         );
         assert_eq!(
             segment_texts_with_word_break(
@@ -1535,7 +1637,23 @@ mod tests {
                 WhiteSpaceMode::Normal,
                 WordBreakMode::KeepAll
             ),
-            vec!["foo-".to_owned(), "bar".to_owned(), "日本語".to_owned()]
+            vec!["foo-".to_owned(), "bar日本語".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "foo—bar日本語",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["foo".to_owned(), "—".to_owned(), "bar日本語".to_owned()]
+        );
+        assert_eq!(
+            segment_texts_with_word_break(
+                "foo?bar日本語",
+                WhiteSpaceMode::Normal,
+                WordBreakMode::KeepAll
+            ),
+            vec!["foo?".to_owned(), "bar日本語".to_owned()]
         );
         assert_eq!(
             segment_texts_with_word_break(

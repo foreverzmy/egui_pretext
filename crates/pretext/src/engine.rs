@@ -56,6 +56,7 @@ pub struct PrepareOptions {
     pub white_space: WhiteSpaceMode,
     pub word_break: WordBreakMode,
     pub paragraph_direction: ParagraphDirection,
+    pub letter_spacing: f32,
 }
 
 impl Default for PrepareOptions {
@@ -64,6 +65,7 @@ impl Default for PrepareOptions {
             white_space: WhiteSpaceMode::Normal,
             word_break: WordBreakMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
         }
     }
 }
@@ -229,6 +231,7 @@ pub(crate) struct PreparedCore {
     pub white_space: WhiteSpaceMode,
     pub word_break: WordBreakMode,
     pub paragraph_direction: ParagraphDirection,
+    pub letter_spacing: f32,
 }
 
 #[allow(dead_code)]
@@ -293,6 +296,7 @@ struct PrepareCacheKey {
     white_space: WhiteSpaceMode,
     word_break: WordBreakMode,
     paragraph_direction: ParagraphDirection,
+    letter_spacing_bits: u32,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -310,6 +314,7 @@ struct AtomicPlaceholderCacheKey {
     white_space: WhiteSpaceMode,
     word_break: WordBreakMode,
     paragraph_direction: ParagraphDirection,
+    letter_spacing_bits: u32,
 }
 
 impl PreparedText {
@@ -325,6 +330,7 @@ impl PreparedText {
         white_space: WhiteSpaceMode,
         word_break: WordBreakMode,
         paragraph_direction: ParagraphDirection,
+        letter_spacing: f32,
     ) -> Self {
         Self {
             core: Arc::new(PreparedCore {
@@ -339,6 +345,7 @@ impl PreparedText {
                 white_space,
                 word_break,
                 paragraph_direction,
+                letter_spacing: sanitize_letter_spacing(letter_spacing),
             }),
         }
     }
@@ -361,6 +368,10 @@ impl PreparedText {
 
     pub(crate) fn paragraph_direction(&self) -> ParagraphDirection {
         self.core.paragraph_direction
+    }
+
+    pub(crate) fn letter_spacing(&self) -> f32 {
+        self.core.letter_spacing
     }
 
     pub(crate) fn text_hash(&self) -> u64 {
@@ -553,6 +564,7 @@ impl PrepareCacheKey {
             white_space: opts.white_space,
             word_break: opts.word_break,
             paragraph_direction: opts.paragraph_direction,
+            letter_spacing_bits: sanitize_letter_spacing(opts.letter_spacing).to_bits(),
         }
     }
 }
@@ -576,6 +588,7 @@ impl AtomicPlaceholderCacheKey {
             white_space: opts.white_space,
             word_break: opts.word_break,
             paragraph_direction: opts.paragraph_direction,
+            letter_spacing_bits: sanitize_letter_spacing(opts.letter_spacing).to_bits(),
         }
     }
 }
@@ -1016,6 +1029,14 @@ fn hash_locale(locale: Option<String>) -> u64 {
         None => 0u8.hash(&mut state),
     }
     state.finish()
+}
+
+pub(crate) fn sanitize_letter_spacing(letter_spacing: f32) -> f32 {
+    if letter_spacing.is_finite() {
+        letter_spacing
+    } else {
+        0.0
+    }
 }
 
 fn next_engine_revision() -> u64 {
@@ -1803,6 +1824,7 @@ mod tests {
                 white_space: WhiteSpaceMode::PreWrap,
                 word_break: WordBreakMode::Normal,
                 paragraph_direction: ParagraphDirection::Auto,
+                letter_spacing: 0.0,
             },
         );
         let widths = [

@@ -9,10 +9,11 @@ use unicode_bidi::{BidiInfo, Level};
 use crate::analysis::{analyze_text, slice_text, GraphemeKind, WhiteSpaceMode, WordBreakMode};
 use crate::bidi::paragraph_to_bidi_runs;
 use crate::engine::{
-    GraphemeMeta, LayoutCursor, LayoutGlyph, LayoutLine, LayoutLineGlyphRun, LayoutLineRange,
-    LayoutLineRuns, LayoutLineVisualRun, LayoutLineWithGlyphRuns, LayoutLineWithRuns, LayoutResult,
-    LayoutWithLinesResult, LayoutWithRunsResult, LineGeometry, PrepareOptions, PreparedText,
-    PreparedTextWithSegments, Segment, SegmentKind, SegmentMeta, TextStyleSpec,
+    sanitize_letter_spacing, GraphemeMeta, LayoutCursor, LayoutGlyph, LayoutLine,
+    LayoutLineGlyphRun, LayoutLineRange, LayoutLineRuns, LayoutLineVisualRun,
+    LayoutLineWithGlyphRuns, LayoutLineWithRuns, LayoutResult, LayoutWithLinesResult,
+    LayoutWithRunsResult, LineGeometry, PrepareOptions, PreparedText, PreparedTextWithSegments,
+    Segment, SegmentKind, SegmentMeta, TextStyleSpec,
 };
 use crate::font_catalog::FontCatalog;
 use crate::line_break::compute_breaks;
@@ -38,6 +39,7 @@ struct ParagraphCacheKey {
     white_space: WhiteSpaceMode,
     word_break: WordBreakMode,
     paragraph_direction: crate::bidi::ParagraphDirection,
+    letter_spacing_bits: u32,
 }
 
 #[derive(Clone)]
@@ -99,6 +101,7 @@ pub(crate) fn prepare_text(
     let break_after = compute_breaks(&analysis);
     let hash = hash_text(&analysis.normalized);
     let style_hash = hash_style(style);
+    let letter_spacing = sanitize_letter_spacing(opts.letter_spacing);
 
     let graphemes: Vec<GraphemeMeta> = analysis
         .graphemes
@@ -168,6 +171,7 @@ pub(crate) fn prepare_text(
         analysis.white_space,
         analysis.word_break,
         opts.paragraph_direction,
+        letter_spacing,
     );
 
     PreparedTextWithSegments {
@@ -182,6 +186,7 @@ pub(crate) fn prepare_atomic_placeholder(
     locale_hash: u64,
 ) -> PreparedTextWithSegments {
     let safe_width = width.max(0.0);
+    let letter_spacing = sanitize_letter_spacing(opts.letter_spacing);
     let graphemes: Arc<[GraphemeMeta]> = Arc::from(vec![GraphemeMeta {
         byte_range: 0..0,
         advance: safe_width,
@@ -211,6 +216,7 @@ pub(crate) fn prepare_atomic_placeholder(
         opts.white_space,
         opts.word_break,
         opts.paragraph_direction,
+        letter_spacing,
     );
 
     PreparedTextWithSegments {
@@ -436,6 +442,7 @@ fn materialize_line_and_internal_runs(
 struct InternalFragment {
     text: String,
     width: f32,
+    content_width: f32,
     start: LayoutCursor,
     end: LayoutCursor,
     start_byte: usize,
@@ -448,6 +455,7 @@ struct InternalFragment {
 struct InternalLogicalRun {
     text: String,
     width: f32,
+    content_width: f32,
     start: LayoutCursor,
     end: LayoutCursor,
     start_byte: usize,
@@ -518,6 +526,7 @@ fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInt
     let mut fragments = Vec::new();
     let mut cursor = line.start;
     let mut line_width = 0.0f32;
+    let mut has_rendered_content = false;
 
     while cursor != line.end {
         let Some((segment, grapheme)) = grapheme_at(prepared, cursor) else {
@@ -535,11 +544,14 @@ fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInt
             _ => {}
         }
 
-        let advance = grapheme_advance(segment, grapheme, line_width);
+        let leading_spacing = leading_letter_spacing(prepared, has_rendered_content, grapheme);
+        let content_width = grapheme_advance(segment, grapheme, line_width + leading_spacing);
+        let advance = leading_spacing + content_width;
         let (level, direction) = bidi_props_for_grapheme(prepared, grapheme);
         fragments.push(InternalFragment {
             text: slice_text(prepared.text(), &grapheme.byte_range).to_owned(),
             width: advance,
+            content_width,
             start: cursor,
             end: next,
             start_byte: grapheme.byte_range.start,
@@ -548,6 +560,7 @@ fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInt
             direction,
         });
         line_width += advance;
+        has_rendered_content = true;
         cursor = next;
     }
 
@@ -563,6 +576,7 @@ fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInt
             if last.level == fragment.level && last.direction == fragment.direction {
                 last.text.push_str(&fragment.text);
                 last.width += fragment.width;
+                last.content_width += fragment.content_width;
                 last.end = fragment.end;
                 last.end_byte = fragment.end_byte;
                 continue;
@@ -572,6 +586,7 @@ fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInt
         logical_runs.push(InternalLogicalRun {
             text: fragment.text,
             width: fragment.width,
+            content_width: fragment.content_width,
             start: fragment.start,
             end: fragment.end,
             start_byte: fragment.start_byte,
@@ -592,6 +607,7 @@ fn line_runs_internal(prepared: &PreparedText, line: &LayoutLine) -> LineRunsInt
             if let Some(last) = logical_runs.last_mut() {
                 last.text.push('-');
                 last.width += (line.width - logical_width).max(0.0);
+                last.content_width += (line.width - logical_width).max(0.0);
                 last.append_synthetic_hyphen = true;
             }
         }
@@ -614,6 +630,7 @@ fn next_line_range_internal(
     let mut cursor = normalize_line_start(prepared, *start)?;
     let line_start = cursor;
     let mut line_width = 0.0f32;
+    let mut has_rendered_content = false;
     let mut last_break: Option<(LayoutCursor, f32, bool)> = None;
 
     loop {
@@ -638,11 +655,14 @@ fn next_line_range_internal(
             return Some((range, false));
         }
 
-        let advance = grapheme_advance(segment, grapheme, line_width);
+        let leading_spacing = leading_letter_spacing(prepared, has_rendered_content, grapheme);
+        let content_width = grapheme_advance(segment, grapheme, line_width + leading_spacing);
+        let advance = leading_spacing + content_width;
         let next_width = line_width + advance;
+        let next_fit_width = next_width + trailing_fit_letter_spacing(prepared, grapheme);
         let next_cursor = advance_cursor(prepared, cursor);
 
-        if next_width > max_width + LINE_FIT_EPSILON && cursor != line_start {
+        if next_fit_width > max_width + LINE_FIT_EPSILON && cursor != line_start {
             if prepared.white_space() == WhiteSpaceMode::Normal
                 && grapheme.kind == GraphemeKind::Space
             {
@@ -675,17 +695,30 @@ fn next_line_range_internal(
         }
 
         line_width = next_width;
+        if rendered_letter_spacing_grapheme(grapheme) {
+            has_rendered_content = true;
+        }
         if matches!(
             grapheme.break_after,
             crate::line_break::BreakOpportunity::Allowed
                 | crate::line_break::BreakOpportunity::Forced
         ) {
+            let break_width = if prepared.letter_spacing() != 0.0
+                && prepared.white_space() == WhiteSpaceMode::Normal
+                && matches!(
+                    grapheme.kind,
+                    GraphemeKind::Space | GraphemeKind::ZeroWidthBreak
+                ) {
+                line_width - advance
+            } else {
+                line_width
+            };
             last_break = Some((
                 next_cursor,
                 if grapheme.kind == GraphemeKind::SoftHyphen {
-                    line_width + segment.discretionary_hyphen_width
+                    line_width + discretionary_hyphen_width(prepared, segment)
                 } else {
-                    line_width
+                    break_width
                 },
                 grapheme.kind == GraphemeKind::SoftHyphen,
             ));
@@ -749,6 +782,8 @@ fn collect_internal_run_glyphs(
 ) -> Vec<LayoutGlyph> {
     let mut glyphs = Vec::new();
     let mut pen_x = 0.0f32;
+    let mut has_emitted_cluster = false;
+    let letter_spacing = prepared.letter_spacing();
     let segment_range = if run.direction == crate::bidi::BidiDirection::Rtl {
         EitherSegmentIter::Reverse(run.start.segment_index..=run.end.segment_index)
     } else {
@@ -774,6 +809,9 @@ fn collect_internal_run_glyphs(
             if cluster_slice.cluster_byte < local_start || cluster_slice.cluster_byte >= local_end {
                 continue;
             }
+            if has_emitted_cluster {
+                pen_x += letter_spacing;
+            }
             for glyph in &segment.glyphs[cluster_slice.glyph_start..cluster_slice.glyph_end] {
                 glyphs.push(LayoutGlyph {
                     face_id: glyph.face_id,
@@ -785,10 +823,14 @@ fn collect_internal_run_glyphs(
                 });
                 pen_x += glyph.advance;
             }
+            has_emitted_cluster = true;
         }
     }
 
     if run.append_synthetic_hyphen {
+        if has_emitted_cluster {
+            pen_x += letter_spacing;
+        }
         for glyph in prepared.hyphen_glyphs() {
             glyphs.push(LayoutGlyph {
                 face_id: glyph.face_id,
@@ -896,6 +938,40 @@ fn normalize_line_start(prepared: &PreparedText, mut cursor: LayoutCursor) -> Op
     } else {
         Some(cursor)
     }
+}
+
+fn rendered_letter_spacing_grapheme(grapheme: &GraphemeMeta) -> bool {
+    !matches!(
+        grapheme.kind,
+        GraphemeKind::Newline
+            | GraphemeKind::SoftHyphen
+            | GraphemeKind::ZeroWidthBreak
+            | GraphemeKind::WordJoiner
+    )
+}
+
+fn leading_letter_spacing(
+    prepared: &PreparedText,
+    has_content: bool,
+    grapheme: &GraphemeMeta,
+) -> f32 {
+    if has_content && rendered_letter_spacing_grapheme(grapheme) {
+        prepared.letter_spacing()
+    } else {
+        0.0
+    }
+}
+
+fn trailing_fit_letter_spacing(prepared: &PreparedText, grapheme: &GraphemeMeta) -> f32 {
+    if rendered_letter_spacing_grapheme(grapheme) {
+        prepared.letter_spacing()
+    } else {
+        0.0
+    }
+}
+
+fn discretionary_hyphen_width(prepared: &PreparedText, segment: &SegmentMeta) -> f32 {
+    segment.discretionary_hyphen_width + prepared.letter_spacing()
 }
 
 fn extract_text(
@@ -1035,6 +1111,7 @@ fn paragraph_layout(
             white_space: prepared.white_space(),
             word_break: prepared.word_break(),
             paragraph_direction: prepared.paragraph_direction(),
+            letter_spacing_bits: prepared.letter_spacing().to_bits(),
         };
         return cache.get_or_compute(key, || {
             Arc::new(compute_paragraph_layout(prepared, max_width))

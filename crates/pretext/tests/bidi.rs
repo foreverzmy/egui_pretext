@@ -60,6 +60,7 @@ fn explicit_ltr_paragraph_direction_keeps_rtl_prefix_at_visual_start() {
         &support::default_style(),
         &PretextParagraphOptions {
             paragraph_direction: ParagraphDirection::Ltr,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );

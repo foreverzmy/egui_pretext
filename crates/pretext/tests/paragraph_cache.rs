@@ -24,6 +24,7 @@ fn paragraph_cache_separates_styles() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -33,6 +34,7 @@ fn paragraph_cache_separates_styles() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -47,6 +49,7 @@ fn paragraph_cache_separates_styles() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -68,6 +71,7 @@ fn paragraph_cache_separates_whitespace_modes() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -77,6 +81,7 @@ fn paragraph_cache_separates_whitespace_modes() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::PreWrap,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -90,6 +95,47 @@ fn paragraph_cache_separates_whitespace_modes() {
 }
 
 #[test]
+fn paragraph_cache_separates_letter_spacing() {
+    let engine = support::bundled_engine();
+    let text = "spacing sensitive paragraph";
+    let style = support::default_style();
+
+    let normal = engine.prepare_paragraph(
+        text,
+        &style,
+        &PretextParagraphOptions {
+            letter_spacing: 0.0,
+            ..PretextParagraphOptions::default()
+        },
+    );
+    let tracked = engine.prepare_paragraph(
+        text,
+        &style,
+        &PretextParagraphOptions {
+            letter_spacing: 4.0,
+            ..PretextParagraphOptions::default()
+        },
+    );
+
+    let normal_layout = engine.layout_paragraph(&normal, 180.0, 20.0);
+    let tracked_layout = engine.layout_paragraph(&tracked, 180.0, 20.0);
+
+    let fresh_engine = support::bundled_engine();
+    let fresh_tracked = fresh_engine.prepare_paragraph(
+        text,
+        &style,
+        &PretextParagraphOptions {
+            letter_spacing: 4.0,
+            ..PretextParagraphOptions::default()
+        },
+    );
+    let fresh_tracked_layout = fresh_engine.layout_paragraph(&fresh_tracked, 180.0, 20.0);
+
+    assert_ne!(normal_layout.lines, tracked_layout.lines);
+    assert_eq!(tracked_layout.lines, fresh_tracked_layout.lines);
+}
+
+#[test]
 fn paragraph_cache_separates_atomic_placeholder_widths() {
     let engine = support::bundled_engine();
     let narrow = engine.prepare_atomic_placeholder(
@@ -97,6 +143,7 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -105,6 +152,7 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );
@@ -118,6 +166,7 @@ fn paragraph_cache_separates_atomic_placeholder_widths() {
         &PretextParagraphOptions {
             white_space: WhiteSpaceMode::Normal,
             paragraph_direction: ParagraphDirection::Auto,
+            letter_spacing: 0.0,
             ..PretextParagraphOptions::default()
         },
     );

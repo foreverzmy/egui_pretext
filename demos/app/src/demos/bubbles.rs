@@ -326,6 +326,7 @@ fn bubble_prepare_options() -> PrepareOptions {
         white_space: WhiteSpaceMode::Normal,
         word_break: pretext::WordBreakMode::Normal,
         paragraph_direction: ParagraphDirection::Ltr,
+        letter_spacing: 0.0,
     }
 }
 
