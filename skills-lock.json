@@ -4,17 +4,17 @@
     "writing-plan": {
       "source": "aiomni/omni-skills",
       "sourceType": "github",
-      "computedHash": "26068fb2fde1b5dc7364d85926e1d5dcde8a4b8ac2de61984227aa7f65ae7c62"
+      "computedHash": "f943a3084022176680f6e3e490f2f952b8ecd7f76da3da5624d8243615a19f8c"
     },
     "writing-spec": {
       "source": "aiomni/omni-skills",
       "sourceType": "github",
-      "computedHash": "491425fbb9974652862842d72d1eb6b8b65c5ecb27e794321629c3b86c1b61b0"
+      "computedHash": "9a0e2f5bcb6ed1dc7ba33e9844f35a3992dcc404f3ac1acbf9023c12aea79f14"
     },
     "writing-tasks": {
       "source": "aiomni/omni-skills",
       "sourceType": "github",
-      "computedHash": "5e53b65a4cb8ed0fa9d3e9259baba82b03a40b15897934b25165ef4966f714cb"
+      "computedHash": "18609b69b81d97fcbc355c1139fd1f2b6593561c03d8267786662605aabe234a"
     }
   }
 }

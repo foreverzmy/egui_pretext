@@ -15,6 +15,13 @@ description: Use when asked to design, create, draft, research, validate, or mai
 - If the user's request is in Chinese or another language, respond in that same language and write specs, plans, task cards, reviews, and other generated artifacts in that language.
 - If the user explicitly requests a language, or the surrounding context specifies a language, use that language instead of inferring the language from the request.
 
+## Code Writing Boundary
+
+- Do not write, modify, patch, or generate production code, test code, scripts, or other source files unless the user explicitly asks for direct code implementation or code edits.
+- When the user asks only for Spec work, produce Spec artifacts, analysis, candidate Spec Patches, validation notes, or review feedback without changing source code.
+- It is acceptable to reference code paths, describe interfaces, or include clearly labeled illustrative pseudocode when needed for Spec clarity, but do not apply code changes without explicit user confirmation.
+- If implementation would be useful but the user did not ask for coding, ask for confirmation before writing code.
+
 ## 核心模型
 
 默认采用这个 target model：
