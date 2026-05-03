@@ -3,14 +3,20 @@ name = "pretext-egui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "egui renderer and widget helpers for Pretext paragraph layouts."
+readme = "README.md"
+documentation = "https://docs.rs/pretext-egui"
+keywords = ["egui", "text", "layout", "rendering", "shaping"]
+categories = ["gui", "text-processing", "rendering"]
 
 [dependencies]
 ahash.workspace = true
 egui.workspace = true
 image.workspace = true
 lru.workspace = true
-pretext = { path = "../pretext" }
-pretext-render = { path = "../pretext-render" }
+pretext = { version = "0.1.0", path = "../pretext" }
+pretext-render = { version = "0.1.0", path = "../pretext-render" }
 resvg.workspace = true
 tiny-skia.workspace = true
 ttf-parser.workspace = true

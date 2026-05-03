@@ -1572,7 +1572,7 @@ mod tests {
 
     fn engine() -> PretextEngine {
         PretextEngine::builder()
-            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .with_font_data(crate::demo_assets::bundled_font_data())
             .include_system_fonts(false)
             .build()
     }
@@ -1644,7 +1644,7 @@ mod tests {
         let ctx = egui::Context::default();
         let engine = engine();
         let mut assets = EguiPretextRenderer::default();
-        pretext_egui::experimental::demo_assets::install_demo_fonts(&ctx);
+        crate::demo_assets::install_demo_fonts(&ctx);
         let mut demo = VariableTypographicAsciiDemo::default();
         demo.set_open(true);
 

@@ -9,10 +9,10 @@ use pretext::{
 };
 use pretext_egui::{
     advanced::{enqueue_atlas_warmup, tick_atlas_warmup, AtlasWarmupBucket},
-    experimental::demo_assets::{bundled_font_data, install_demo_fonts},
     EguiPretextRenderer, EguiPretextRendererStats,
 };
 
+use crate::demo_assets::{bundled_font_data, install_demo_fonts};
 use crate::demos::catalog::CatalogInteraction;
 use crate::demos::{self, DemoPerfStats, DemoWarmupStatus, DemoWindow};
 

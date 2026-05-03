@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+#[cfg(test)]
+use crate::demo_assets::bundled_font_data;
 use eframe::egui;
 use egui::{
     Color32, ColorImage, CornerRadius, CursorIcon, Rect, Sense, Stroke, TextureHandle,
@@ -16,8 +18,6 @@ use pretext::{
     PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
     PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode,
 };
-#[cfg(test)]
-use pretext_egui::experimental::demo_assets::bundled_font_data;
 use pretext_egui::{
     advanced::PretextFragmentPainter, EguiPretextPaintOptions, EguiPretextRenderer,
 };

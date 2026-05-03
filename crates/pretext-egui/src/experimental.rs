@@ -7,12 +7,12 @@ pub mod demo_assets {
 
     pub use crate::{EmojiAssetId, SvgAssetId};
 
-    /// Returns owned copies of the bundled demo fonts for building a fresh engine.
+    /// Returns owned copies of the bundled sample fonts for examples and tests.
     pub fn bundled_font_data() -> Vec<Vec<u8>> {
         EguiPretextRenderer::bundled_font_data()
     }
 
-    /// Installs the demo-oriented egui font stack into the current context.
+    /// Installs the bundled sample egui font stack into the current context.
     pub fn install_demo_fonts(ctx: &Context) {
         ctx.set_fonts(EguiPretextRenderer::demo_font_definitions());
     }

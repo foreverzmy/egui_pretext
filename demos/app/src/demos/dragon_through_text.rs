@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn dragon_layout_can_fill_multiple_slots_in_one_band() {
         let engine = PretextEngine::builder()
-            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .with_font_data(crate::demo_assets::bundled_font_data())
             .include_system_fonts(false)
             .build();
         let prepared = engine.prepare_paragraph(

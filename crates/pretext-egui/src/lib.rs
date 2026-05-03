@@ -40,9 +40,9 @@ use crate::glyph_atlas::{GlyphAtlas, GlyphWarmResult};
 const SHAPED_TEXT_TEXTURE_CACHE_CAPACITY: usize = 1024;
 const WARMUP_LINE_HEIGHT_MULTIPLIER: f32 = 1.5;
 
-macro_rules! include_demo_asset {
+macro_rules! include_asset {
     ($path:literal) => {
-        include_bytes!(concat!("../../../demos/app/assets/", $path))
+        include_bytes!(concat!("../assets/", $path))
     };
 }
 
@@ -185,27 +185,20 @@ impl Default for EguiPretextRenderer {
 impl EguiPretextRenderer {
     pub(crate) fn bundled_font_data() -> Vec<Vec<u8>> {
         vec![
-            include_demo_asset!("fonts/NotoSans-Regular.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoSerif-Regular.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoSerif-Italic.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoSerif-Bold.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoSansArabic-Regular.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoSansCJK-Regular.ttc").to_vec(),
-            include_demo_asset!("fonts/NotoSansMyanmar-Regular.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoEmoji-Regular.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoColorEmoji.ttf").to_vec(),
-            include_demo_asset!("fonts/Noto-COLRv1.ttf").to_vec(),
-            include_demo_asset!("fonts/NotoSansMono-Regular.ttf").to_vec(),
+            include_asset!("fonts/NotoSans-Regular.ttf").to_vec(),
+            include_asset!("fonts/NotoSansArabic-Regular.ttf").to_vec(),
+            include_asset!("fonts/NotoEmoji-Regular.ttf").to_vec(),
+            include_asset!("fonts/NotoSansMono-Regular.ttf").to_vec(),
         ]
     }
 
     pub(crate) fn svg_bytes(asset_id: SvgAssetId) -> &'static [u8] {
         match asset_id {
-            SvgAssetId::OpenAiLogo => include_demo_asset!("logos/openai-symbol.svg"),
-            SvgAssetId::ClaudeLogo => include_demo_asset!("logos/claude-symbol.svg"),
-            SvgAssetId::Emoji(EmojiAssetId::Rocket) => include_demo_asset!("emoji_u1f680.svg"),
-            SvgAssetId::Emoji(EmojiAssetId::PartyPopper) => include_demo_asset!("emoji_u1f389.svg"),
-            SvgAssetId::Emoji(EmojiAssetId::CheckMark) => include_demo_asset!("emoji_u2705.svg"),
+            SvgAssetId::OpenAiLogo => include_asset!("logos/openai-symbol.svg"),
+            SvgAssetId::ClaudeLogo => include_asset!("logos/claude-symbol.svg"),
+            SvgAssetId::Emoji(EmojiAssetId::Rocket) => include_asset!("emoji_u1f680.svg"),
+            SvgAssetId::Emoji(EmojiAssetId::PartyPopper) => include_asset!("emoji_u1f389.svg"),
+            SvgAssetId::Emoji(EmojiAssetId::CheckMark) => include_asset!("emoji_u2705.svg"),
         }
     }
 
@@ -220,7 +213,7 @@ impl EguiPretextRenderer {
             return texture.clone();
         }
 
-        let image = rasterize_svg(Self::svg_bytes(asset_id), size, false)
+        let image = rasterize_svg(Self::svg_bytes(asset_id), size)
             .unwrap_or_else(|| transparent_image(size));
         let texture = ctx.load_texture(svg_texture_name(key), image, TextureOptions::LINEAR);
         self.static_svg_textures.insert(key, texture.clone());
@@ -583,54 +576,30 @@ impl EguiPretextRenderer {
         let mut fonts = FontDefinitions::default();
         fonts.font_data.insert(
             "noto-sans".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoSans-Regular.ttf")).into(),
+            FontData::from_static(include_asset!("fonts/NotoSans-Regular.ttf")).into(),
         );
         fonts.font_data.insert(
             "noto-sans-arabic".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoSansArabic-Regular.ttf")).into(),
-        );
-        fonts.font_data.insert(
-            "noto-sans-cjk".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoSansCJK-Regular.ttc")).into(),
-        );
-        fonts.font_data.insert(
-            "noto-sans-myanmar".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoSansMyanmar-Regular.ttf")).into(),
+            FontData::from_static(include_asset!("fonts/NotoSansArabic-Regular.ttf")).into(),
         );
         fonts.font_data.insert(
             "noto-emoji-regular-local".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoEmoji-Regular.ttf")).into(),
-        );
-        fonts.font_data.insert(
-            "noto-color-emoji".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoColorEmoji.ttf")).into(),
-        );
-        fonts.font_data.insert(
-            "noto-colr-emoji".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/Noto-COLRv1.ttf")).into(),
+            FontData::from_static(include_asset!("fonts/NotoEmoji-Regular.ttf")).into(),
         );
         fonts.font_data.insert(
             "noto-sans-mono".to_owned(),
-            FontData::from_static(include_demo_asset!("fonts/NotoSansMono-Regular.ttf")).into(),
+            FontData::from_static(include_asset!("fonts/NotoSansMono-Regular.ttf")).into(),
         );
 
         let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
         proportional.insert(0, "noto-sans".to_owned());
         proportional.insert(1, "noto-sans-arabic".to_owned());
-        proportional.insert(2, "noto-sans-cjk".to_owned());
-        proportional.insert(3, "noto-sans-myanmar".to_owned());
-        proportional.insert(4, "noto-emoji-regular-local".to_owned());
-        proportional.insert(5, "noto-color-emoji".to_owned());
-        proportional.insert(6, "noto-colr-emoji".to_owned());
+        proportional.insert(2, "noto-emoji-regular-local".to_owned());
 
         let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
         monospace.insert(0, "noto-sans-mono".to_owned());
         monospace.insert(1, "noto-sans-arabic".to_owned());
-        monospace.insert(2, "noto-sans-cjk".to_owned());
-        monospace.insert(3, "noto-sans-myanmar".to_owned());
-        monospace.insert(4, "noto-emoji-regular-local".to_owned());
-        monospace.insert(5, "noto-color-emoji".to_owned());
-        monospace.insert(6, "noto-colr-emoji".to_owned());
+        monospace.insert(2, "noto-emoji-regular-local".to_owned());
 
         fonts
     }
@@ -827,20 +796,8 @@ fn alpha_mask_image(size: [usize; 2], alpha_pixels: &[u8]) -> ColorImage {
     ColorImage::new(size, pixels)
 }
 
-fn rasterize_svg(
-    svg_bytes: &[u8],
-    size: [usize; 2],
-    load_bundled_fonts: bool,
-) -> Option<ColorImage> {
-    let mut options = usvg::Options::default();
-    if load_bundled_fonts {
-        let fontdb = options.fontdb_mut();
-        for data in EguiPretextRenderer::bundled_font_data() {
-            fontdb.load_font_data(data);
-        }
-        fontdb.set_sans_serif_family("Noto Sans");
-        fontdb.set_monospace_family("Noto Sans Mono");
-    }
+fn rasterize_svg(svg_bytes: &[u8], size: [usize; 2]) -> Option<ColorImage> {
+    let options = usvg::Options::default();
     let tree = usvg::Tree::from_data(svg_bytes, &options).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(size[0] as u32, size[1] as u32)?;
     let svg_size = tree.size();
@@ -949,40 +906,23 @@ mod tests {
     }
 
     #[test]
-    fn ui_fonts_prefer_local_emoji_fonts_over_builtin_fallbacks() {
+    fn ui_fonts_install_sample_text_stack() {
         let fonts = EguiPretextRenderer::demo_font_definitions();
         let proportional = fonts
             .families
             .get(&FontFamily::Proportional)
             .expect("proportional family");
-        let local_outline = proportional
-            .iter()
-            .position(|name| name == "noto-emoji-regular-local")
-            .expect("expected local Noto Emoji font in proportional family");
-        let local_color = proportional
-            .iter()
-            .position(|name| name == "noto-color-emoji")
-            .expect("expected local Noto Color Emoji font in proportional family");
-        let local_colr = proportional
-            .iter()
-            .position(|name| name == "noto-colr-emoji")
-            .expect("expected local COLRv1 emoji font in proportional family");
-        let builtin_emoji = proportional
-            .iter()
-            .position(|name| name == "NotoEmoji-Regular")
-            .expect("expected builtin emoji fallback in proportional family");
 
-        assert!(local_outline < builtin_emoji);
-        assert!(local_color < builtin_emoji);
-        assert!(local_colr < builtin_emoji);
-        assert!(local_outline < local_color);
-        assert!(fonts.font_data.contains_key("noto-colr-emoji"));
-        assert!(fonts.font_data.contains_key("noto-color-emoji"));
+        assert_eq!(proportional[0], "noto-sans");
+        assert_eq!(proportional[1], "noto-sans-arabic");
+        assert_eq!(proportional[2], "noto-emoji-regular-local");
+        assert!(fonts.font_data.contains_key("noto-sans"));
+        assert!(fonts.font_data.contains_key("noto-sans-arabic"));
         assert!(fonts.font_data.contains_key("noto-emoji-regular-local"));
     }
 
     #[test]
-    fn installed_ui_fonts_cover_mixed_arabic_and_extended_emoji_text() {
+    fn installed_ui_fonts_cover_mixed_arabic_and_builtin_emoji_text() {
         let ctx = egui::Context::default();
         experimental::demo_assets::install_demo_fonts(&ctx);
 
@@ -991,17 +931,15 @@ mod tests {
             let font_id = FontId::new(16.0, FontFamily::Proportional);
             probe = Some(ctx.fonts_mut(|fonts| {
                 (
-                    fonts.has_glyphs(&font_id, "بدأت الرحلة 🚀 🧪"),
+                    fonts.has_glyphs(&font_id, "بدأت الرحلة 🚀"),
                     fonts.glyph_width(&font_id, '🚀'),
-                    fonts.glyph_width(&font_id, '🧪'),
                 )
             }));
         });
-        let (supports_sample, rocket_width, lab_width) = probe.expect("expected probe result");
+        let (supports_sample, rocket_width) = probe.expect("expected probe result");
 
         assert!(supports_sample);
         assert!(rocket_width > 0.0);
-        assert!(lab_width > 0.0);
     }
 
     #[test]

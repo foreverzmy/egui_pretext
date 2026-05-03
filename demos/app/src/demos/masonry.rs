@@ -660,7 +660,7 @@ mod tests {
 
     fn bundled_engine() -> PretextEngine {
         PretextEngine::builder()
-            .with_font_data(pretext_egui::experimental::demo_assets::bundled_font_data())
+            .with_font_data(crate::demo_assets::bundled_font_data())
             .include_system_fonts(false)
             .build()
     }

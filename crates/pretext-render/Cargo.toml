@@ -3,11 +3,17 @@ name = "pretext-render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shaping-backed text rasterization helpers for Pretext layouts."
+readme = "README.md"
+documentation = "https://docs.rs/pretext-render"
+keywords = ["text", "raster", "layout", "font", "shaping"]
+categories = ["text-processing", "rendering"]
 
 [dependencies]
 ahash.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
-pretext = { path = "../pretext" }
+pretext = { version = "0.1.0", path = "../pretext" }
 tiny-skia.workspace = true
 ttf-parser.workspace = true

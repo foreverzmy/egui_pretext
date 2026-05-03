@@ -3,6 +3,12 @@ name = "pretext"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Native Unicode text preparation and paragraph layout engine for Pretext."
+readme = "README.md"
+documentation = "https://docs.rs/pretext"
+keywords = ["text", "layout", "bidi", "unicode", "shaping"]
+categories = ["text-processing"]
 
 [dependencies]
 ahash.workspace = true

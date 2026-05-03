@@ -1,6 +1,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+#[cfg(test)]
+use crate::demo_assets::bundled_font_data;
 use eframe::egui;
 use egui::epaint::{Mesh, Vertex};
 use egui::{
@@ -15,14 +17,11 @@ use pretext::{
     PretextPreparedParagraph as PreparedTextWithSegments, PretextStyle as TextStyleSpec,
     PretextVisualRun as LayoutLineVisualRun, WhiteSpaceMode,
 };
-#[cfg(test)]
-use pretext_egui::experimental::demo_assets::bundled_font_data;
 use pretext_egui::{
-    advanced::PretextFragmentPainter,
-    experimental::demo_assets::{bundled_svg_texture, svg_bytes, SvgAssetId},
-    EguiPretextPaintOptions, EguiPretextRenderer,
+    advanced::PretextFragmentPainter, EguiPretextPaintOptions, EguiPretextRenderer,
 };
 
+use crate::demo_assets::{bundled_svg_texture, svg_bytes, SvgAssetId};
 use crate::demos::{format_warmup_status, DemoPerfStats, DemoWarmupStatus, DemoWindow};
 #[cfg(test)]
 use crate::geometry::carve_text_line_slots;
